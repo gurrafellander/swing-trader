@@ -1,8 +1,7 @@
 # strategies.py
-
 import vectorbt as vbt
 import pandas as pd
-
+import numpy as np
 from config import (
     RSI_WINDOW,
     RSI_ENTRY,
@@ -14,181 +13,180 @@ from config import (
     TOP_N,
     SPY_MA,
     REBALANCE_FREQ,
+    POSITION_SIZE,
 )
 
 
 # ---------------------------------------------------
-# 1. RSI Mean Reversion
+# Helpers
 # ---------------------------------------------------
 
-
-def rsi_mean_reversion(close: pd.DataFrame):
-
-    rsi = vbt.RSI.run(close, window=RSI_WINDOW)
-
-    raw_entries = rsi.rsi < RSI_ENTRY
-    exits = rsi.rsi > RSI_EXIT
-
-    if USE_RANKING:
-        score = 100 - rsi.rsi
-        rank = score.rank(axis=1, ascending=False)
-        entries = raw_entries & (rank <= MAX_POSITIONS)
-    else:
-        entries = raw_entries
-
-    return entries, exits
+def _flatten(df, close):
+    """Flatten MultiIndex columns from vbt indicators to match close columns."""
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = close.columns
+    return df
 
 
-# ---------------------------------------------------
-# 2. Moving Average Crossover (Trend Following)
-# ---------------------------------------------------
-
-
-def ma_crossover(close: pd.DataFrame, fast_window=20, slow_window=50):
-
-    fast_ma = vbt.MA.run(close, fast_window)
-    slow_ma = vbt.MA.run(close, slow_window)
-
-    raw_entries = fast_ma.ma_crossed_above(slow_ma)
-    exits = fast_ma.ma_crossed_below(slow_ma)
-
-    if USE_RANKING:
-        # Rank strongest trend distance
-        score = (fast_ma.ma - slow_ma.ma) / slow_ma.ma
-        rank = score.rank(axis=1, ascending=False)
-        entries = raw_entries & (rank <= MAX_POSITIONS)
-    else:
-        entries = raw_entries
-
-    return entries, exits
-
-
-# ---------------------------------------------------
-# 3. Bollinger Band Mean Reversion
-# ---------------------------------------------------
-
-
-def bollinger_mean_reversion(close: pd.DataFrame, window=20, std=2):
-
-    bb = vbt.BBANDS.run(close, window=window, alpha=std)
-
-    lower = bb.lower
-    upper = bb.upper
-    mid = bb.middle
-
-    raw_entries = close < lower
-    exits = close > mid
-
-    if USE_RANKING:
-        # Strongest deviation below band
-        score = (lower - close) / close
-        rank = score.rank(axis=1, ascending=False)
-        entries = raw_entries & (rank <= MAX_POSITIONS)
-    else:
-        entries = raw_entries
-
-    return entries, exits
-
-
-def momentum_pullback(close, spy_close):
-
-    rsi = vbt.RSI.run(close, window=3)
-
-    ma200 = vbt.MA.run(close, 200).ma
-    ma50 = vbt.MA.run(close, 50).ma
-
-    spy_ma200 = vbt.MA.run(spy_close, 200).ma
-
-    market_filter = spy_close > spy_ma200
-
-    trend_filter = close > ma200
-
-    # 6 month momentum
-    momentum = close.pct_change(126)
-
-    rank = momentum.rank(axis=1, ascending=False)
-
-    top_momentum = rank <= int(close.shape[1] * 0.3)
-
-    entries = (
-        market_filter.values.reshape(-1, 1)
-        & trend_filter
-        & top_momentum
-        & (rsi.rsi < 20)
-    )
-
-    exits = (rsi.rsi > 60) | (close < ma50)
-
-    return entries, exits
+def _make_weights(entry: np.ndarray, exit_: np.ndarray, weight: float) -> np.ndarray:
+    """NaN=hold, 0=close, weight=open/maintain."""
+    out = np.full(entry.shape, np.nan, dtype=np.float32)
+    out[exit_ & ~entry] = 0.0
+    out[entry] = weight
+    return out
 
 
 def _rebalance_mask(index):
-    """Create a mask for rebalance timing (weekly/monthly/etc)."""
-    s = pd.Series(index=index, data=1)
-    return s.resample(REBALANCE_FREQ).first().reindex(index).notna()
+    """True only on the first trading day of each rebalance period."""
+    freq = REBALANCE_FREQ if REBALANCE_FREQ != "W" else "W-FRI"
+    dates_only = index.normalize()
+    s = pd.Series(1, index=dates_only)
+    rebalance_dates = s.resample(freq).first().index.normalize()
+    return pd.Series(dates_only.isin(rebalance_dates), index=index)
 
 
-# ----------------------------------------------------------
-# Strategy 1
-# Cross-Sectional Momentum (Top N performers)
-# ----------------------------------------------------------
+# ---------------------------------------------------
+# 1. RSI Mean Reversion (original, kept for reference)
+# ---------------------------------------------------
+
+def rsi_mean_reversion(close: pd.DataFrame):
+    rsi = _flatten(vbt.RSI.run(close, window=RSI_WINDOW).rsi, close)
+    rsi_prev = rsi.shift(1)
+    entry_cross = (rsi < RSI_ENTRY) & (rsi_prev >= RSI_ENTRY)
+    consecutive_stop = (rsi < 20).rolling(10).sum() >= 10
+    exit_cross = ((rsi > RSI_EXIT) & (rsi_prev <= RSI_EXIT)) | consecutive_stop
+
+    if USE_RANKING:
+        score = np.where(entry_cross.values, RSI_ENTRY - rsi.values, np.nan)
+        rank = pd.DataFrame(score, index=close.index, columns=close.columns) \
+                 .rank(axis=1, ascending=False, na_option='bottom').values
+        entries = entry_cross & pd.DataFrame(
+            rank <= MAX_POSITIONS, index=close.index, columns=close.columns)
+    else:
+        entries = entry_cross
+
+    return entries, exit_cross
 
 
-def momentum_rank_strategy(close):
+# ---------------------------------------------------
+# 2. Cross-Sectional Momentum with Vol Weighting + Regime Filter
+#
+# Thesis:
+#   - Stocks that outperformed over the past 6 months tend to keep
+#     outperforming over the next 1-3 months (momentum premium).
+#   - Weighting by inverse volatility improves risk-adjusted returns
+#     vs equal weight — you're not dominated by the most erratic names.
+#   - A market regime filter (index > 200d MA) keeps you in cash during
+#     bear markets, dramatically cutting drawdowns.
+#   - Monthly rebalance gives momentum time to play out while staying
+#     responsive to changes in leadership.
+#
+# Expected properties vs RSI mean reversion:
+#   - ~120 trades over 8 years (vs 7800) → fees ~5k vs 57k
+#   - Avg hold: 20-40 days (vs 10)
+#   - Naturally long-biased → profits from the market's upward drift
+# ---------------------------------------------------
+
+def momentum_with_regime(close: pd.DataFrame, benchmark: pd.Series):
     """
-    Rank stocks by momentum and hold TOP_N.
+    Parameters
+    ----------
+    close     : DataFrame of stock prices (your universe)
+    benchmark : Series of index/benchmark prices for regime filter (e.g. OMXS30)
+
+    Returns
+    -------
+    target_weights : DataFrame (NaN=hold, 0=close, float=target allocation)
+                     for use with vbt.Portfolio.from_orders + size_type='targetpercent'
     """
+    # --- Momentum score: skip last month to avoid short-term reversal ---
+    # Classic impl: (t-252 to t-21) return, i.e. 12-1 month momentum
+    mom_start = close.shift(21)           # exclude most recent month
+    mom_end   = close.shift(MOMENTUM_LOOKBACK)  # 6 months ago (126 days)
+    momentum  = (mom_start / mom_end) - 1  # return over the lookback window
 
-    momentum = close / close.shift(MOMENTUM_LOOKBACK) - 1
+    # --- Volatility: annualised daily return std over VOL_LOOKBACK ---
+    daily_vol = close.pct_change().rolling(VOL_LOOKBACK).std() * np.sqrt(252)
+    daily_vol = daily_vol.replace(0, np.nan)
 
-    rank = momentum.rank(axis=1, ascending=False)
+    # --- Inverse-vol weights among top N ---
+    inv_vol = 1.0 / daily_vol
 
+    # --- Regime filter: benchmark above its 200-day MA ---
+    bench_ma200 = benchmark.rolling(SPY_MA).mean()
+    market_up   = (benchmark > bench_ma200).reindex(close.index).fillna(False)
+
+    # --- Rebalance mask ---
     rebalance = _rebalance_mask(close.index)
 
-    long_candidates = rank <= TOP_N
+    # --- Build target weight matrix ---
+    # NaN everywhere by default (hold), updated only on rebalance days
+    out = pd.DataFrame(np.nan, index=close.index, columns=close.columns,
+                       dtype=np.float32)
 
-    entries = long_candidates & rebalance.values[:, None]
+    for date in close.index[rebalance]:
+        mom_row    = momentum.loc[date]
+        invvol_row = inv_vol.loc[date]
 
-    exits = (~long_candidates) & rebalance.values[:, None]
+        if not market_up.loc[date]:
+            # Bear regime: close all positions → set everything to 0
+            out.loc[date, :] = 0.0
+            continue
 
-    return entries, exits
+        # Drop tickers with insufficient data
+        valid = mom_row.notna() & invvol_row.notna()
+        if valid.sum() < TOP_N:
+            out.loc[date, :] = 0.0
+            continue
+
+        # Rank by momentum, select top N
+        ranked = mom_row[valid].rank(ascending=False)
+        top_n  = ranked[ranked <= TOP_N].index
+
+        # Inverse-vol weights, normalised to sum to 1
+        weights = invvol_row[top_n]
+        weights = weights / weights.sum()
+
+        # Set target allocations; close everything not in top N
+        out.loc[date, :] = 0.0
+        out.loc[date, top_n] = weights.astype(np.float32)
+
+    return out
 
 
-# ----------------------------------------------------------
-# Strategy 2
-# Volatility Adjusted Momentum + Market Filter
-# ----------------------------------------------------------
+# ---------------------------------------------------
+# 3. Moving Average Crossover
+# ---------------------------------------------------
+
+def ma_crossover(close: pd.DataFrame, fast_window=20, slow_window=50):
+    fast_ma = _flatten(vbt.MA.run(close, fast_window).ma, close)
+    slow_ma = _flatten(vbt.MA.run(close, slow_window).ma, close)
+    entry = (fast_ma > slow_ma).values
+    exit_ = (fast_ma < slow_ma).values
+    if USE_RANKING:
+        score = np.where(entry, (fast_ma.values - slow_ma.values) / slow_ma.values, np.nan)
+        rank = pd.DataFrame(score, index=close.index, columns=close.columns) \
+                 .rank(axis=1, ascending=False, na_option='bottom').values
+        entry = entry & (rank <= MAX_POSITIONS)
+    weights = _make_weights(entry, exit_, POSITION_SIZE)
+    return pd.DataFrame(weights, index=close.index, columns=close.columns)
 
 
-def vol_adjusted_momentum_strategy(close, spy_close):
-    """
-    Momentum normalized by volatility + SPY regime filter
-    """
+# ---------------------------------------------------
+# 4. Bollinger Band Mean Reversion
+# ---------------------------------------------------
 
-    returns = close.pct_change()
-
-    momentum = close.pct_change(MOMENTUM_LOOKBACK)
-
-    vol = returns.rolling(VOL_LOOKBACK).std()
-
-    score = momentum / vol
-
-    rank = score.rank(axis=1, ascending=False)
-
-    rebalance = _rebalance_mask(close.index)
-
-    long_candidates = rank <= TOP_N
-
-    # Market regime filter
-    spy_ma = spy_close.rolling(SPY_MA).mean()
-    market_up = spy_close > spy_ma
-
-    market_up = market_up.reindex(close.index).fillna(False)
-
-    entries = long_candidates & rebalance.values[:, None] & market_up.values[:, None]
-
-    exits = ((~long_candidates) | (~market_up.values[:, None])) & rebalance.values[
-        :, None
-    ]
-
-    return entries, exits
+def bollinger_mean_reversion(close: pd.DataFrame, window=20, std=2):
+    bb    = vbt.BBANDS.run(close, window=window, alpha=std)
+    lower = _flatten(bb.lower,  close)
+    mid   = _flatten(bb.middle, close)
+    entry = (close < lower).values
+    exit_ = (close > mid).values
+    if USE_RANKING:
+        score = np.where(entry, (lower.values - close.values) / close.values, np.nan)
+        rank = pd.DataFrame(score, index=close.index, columns=close.columns) \
+                 .rank(axis=1, ascending=False, na_option='bottom').values
+        entry = entry & (rank <= MAX_POSITIONS)
+    weights = _make_weights(entry, exit_, POSITION_SIZE)
+    return pd.DataFrame(weights, index=close.index, columns=close.columns)
