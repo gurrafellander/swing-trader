@@ -1,0 +1,3 @@
+add script for getting the new portfolio for strategy usage. Must be input of total equity to use and then it gives out, # of XXX, ## of YYY, etc. 
+add nice front and
+implement caching of universe to get quicker response
