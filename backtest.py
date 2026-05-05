@@ -1,132 +1,107 @@
 # backtest.py
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import vectorbt as vbt
 
-from config import (
-    START_DATE,
-    END_DATE,
-    MIN_HISTORY,
-    INITIAL_CASH,
-    FEES,
-    SLIPPAGE,
-    POSITION_SIZE,
-    SIZE_TYPE,
-)
-from strategies import momentum_with_regime
+from DataLoader import DataLoader
+from config import cfg
+from strategies import momentum_sharpe_optimised, momentum_with_regime
 
-
-def load_universe():
-    with open("tickers.txt") as f:
-        return [line.strip() for line in f if line.strip()]
-
-
-def download_clean_data(tickers):
-    print("Downloading data individually...")
-    close_dict = {}
-    for ticker in tickers:
-        try:
-            data = vbt.YFData.download(
-                ticker, start=START_DATE, end=END_DATE, interval="1d")
-            close = data.get("Close")
-            if close is None or close.empty:
-                print(f"Skipping {ticker} (no data)")
-                continue
-            close_dict[ticker] = close
-        except Exception as e:
-            print(f"Skipping {ticker}: {e}")
-
-    if not close_dict:
-        raise ValueError("No valid tickers downloaded.")
-
-    close_df = pd.concat(close_dict.values(), axis=1)
-    close_df.columns = list(close_dict.keys())
-    close_df = close_df.sort_index().ffill().dropna(how="all")
-    valid_cols = close_df.count() >= MIN_HISTORY
-    close_df = close_df.loc[:, valid_cols]
-    print(f"Remaining tickers after MIN_HISTORY filter: {close_df.shape[1]}")
-    return close_df
-
-
-def download_benchmark(index, ticker="^OMX"):
-    print(f"Downloading benchmark ({ticker})...")
-    try:
-        data = vbt.YFData.download(ticker, start=START_DATE, end=END_DATE, interval="1d")
-        bench = data.get("Close")
-        bench = bench.reindex(index).ffill()
-        # squeeze in case it comes back as DataFrame
-        if isinstance(bench, pd.DataFrame):
-            bench = bench.iloc[:, 0]
-        return bench
-    except Exception as e:
-        print(f"Could not download benchmark: {e}")
-        return None
+STRATEGY = momentum_sharpe_optimised  # swap to momentum_with_regime to compare
+STRATEGY_NAME = STRATEGY.__name__
 
 
 def run_backtest():
-    tickers = load_universe()
-    close   = download_clean_data(tickers)
-    print(f"Final dataset shape: {close.shape}")
+    loader = DataLoader("tickers.txt", cfg.start_date, cfg.end_date, cfg.min_history)
+    close = loader.download_clean_data()
 
-    # Benchmark used for regime filter AND chart comparison
-    benchmark = download_benchmark(close.index, ticker="^OMX")
+    benchmark = loader.download_benchmark(close.index, ticker="^OMX")
     if benchmark is None:
-        # Fallback: equal-weight universe as proxy
-        print("WARNING: no benchmark downloaded, using universe mean as regime proxy")
+        print("WARNING: no benchmark downloaded — using universe mean as regime proxy")
         benchmark = close.mean(axis=1)
 
-    # --- Strategy: cross-sectional momentum with vol weighting + regime filter ---
-    target_weights = momentum_with_regime(close, benchmark)
+    target_weights = STRATEGY(close, benchmark)
 
-    # --- Backtest with from_orders + targetpercent ---
-    # momentum_with_regime returns a full weight matrix so from_orders is correct:
-    # weights only change on monthly rebalance dates → very few trades.
     pf = vbt.Portfolio.from_orders(
         close,
         size=target_weights,
         size_type="targetpercent",
-        init_cash=INITIAL_CASH,
-        fees=FEES,
-        slippage=SLIPPAGE,
+        init_cash=cfg.initial_cash,
+        fees=cfg.fees,
+        slippage=cfg.slippage,
         group_by=True,
         cash_sharing=True,
-        call_seq="auto",          # sells before buys → frees cash correctly
-        freq="1D",
+        freq="D",  # business-day frequency — avoids weekend gap errors
     )
 
-    print("\n===== BACKTEST RESULTS =====\n")
-    print(pf.stats())
+    print(f"\n===== BACKTEST RESULTS: {STRATEGY_NAME} =====\n")
+    stats = pf.stats()
+    print(stats)
+    stats.to_csv(f"stats_{STRATEGY_NAME}.csv")
 
-    # --- Equity curve plot ---
+    # --- Plot: equity curve + drawdown ----------------------------------------
     portfolio_value = pf.value()
     if isinstance(portfolio_value, pd.DataFrame):
         portfolio_value = portfolio_value.iloc[:, 0]
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=portfolio_value.index, y=portfolio_value.values,
-        name="Momentum Strategy",
-        line=dict(color="royalblue", width=2),
-    ))
+    drawdown = (portfolio_value / portfolio_value.cummax() - 1) * 100  # percent
 
-    if benchmark is not None:
-        bench_norm = (benchmark / benchmark.dropna().iloc[0]) * INITIAL_CASH
-        fig.add_trace(go.Scatter(
-            x=bench_norm.index, y=bench_norm.values,
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.7, 0.3],
+        vertical_spacing=0.04,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=portfolio_value.index,
+            y=portfolio_value.values,
+            name=STRATEGY_NAME,
+            line=dict(color="royalblue", width=2),
+        ),
+        row=1,
+        col=1,
+    )
+
+    bench_norm = (benchmark / benchmark.dropna().iloc[0]) * cfg.initial_cash
+    fig.add_trace(
+        go.Scatter(
+            x=bench_norm.index,
+            y=bench_norm.values,
             name="OMXS30 (buy & hold)",
             line=dict(color="gray", width=1.5, dash="dash"),
-        ))
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=drawdown.index,
+            y=drawdown.values,
+            name="Drawdown %",
+            fill="tozeroy",
+            line=dict(color="crimson", width=1),
+        ),
+        row=2,
+        col=1,
+    )
 
     fig.update_layout(
-        title="Portfolio Value Over Time — Momentum + Regime Filter",
-        xaxis_title="Date",
+        title=f"Portfolio Value — {STRATEGY_NAME}",
         yaxis_title="Portfolio Value (SEK)",
+        yaxis2_title="Drawdown %",
         hovermode="x unified",
         template="plotly_white",
     )
-    fig.write_html("portfolio_value.html")
-    print("\nPlot saved to portfolio_value.html")
+
+    out_html = f"portfolio_{STRATEGY_NAME}.html"
+    fig.write_html(out_html)
+    print(f"\nPlot saved to {out_html}")
+
     return pf
 
 

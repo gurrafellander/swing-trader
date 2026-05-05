@@ -1,35 +1,49 @@
-# config.py
+from dataclasses import dataclass, field
+from typing import Optional
 
-# Backtest Settings
-INITIAL_CASH = 100000
-FEES         = 0.001    # 0.10% per trade
-SLIPPAGE     = 0.0005   # 0.05% per trade
 
-# Portfolio Constraints
-MAX_POSITIONS = 10
-POSITION_SIZE = 1 / MAX_POSITIONS   # used by RSI strategy
-SIZE_TYPE     = "percent"
+@dataclass
+class Config:
+    # ── Backtest ──────────────────────────────────────────────────────────────
+    initial_cash: float = 100_000
+    fees: float = 0.001  # 0.10 % per trade
+    slippage: float = 0.0005  # 0.05 % per trade
+    rf_daily: float = 0.0
 
-# Data Settings
-START_DATE = "2018-01-01"
-END_DATE   = None   # None = today
+    # ── Portfolio constraints ─────────────────────────────────────────────────
+    max_positions: int = 10
+    size_type: str = "percent"
 
-# Minimum history requirement (days)
-MIN_HISTORY = 200
+    @property
+    def position_size(self) -> float:
+        return 1.0 / self.max_positions
 
-# RSI Strategy Parameters
-RSI_WINDOW = 14
-RSI_ENTRY  = 30
-RSI_EXIT   = 55
+    # ── Data ─────────────────────────────────────────────────────────────────
+    start_date: str = "2018-01-01"
+    end_date: Optional[str] = None  # None → today
+    min_history: int = 200
 
-# Momentum Strategy Parameters
-TOP_N             = 15     # number of stocks to hold
-MOMENTUM_LOOKBACK = 252    # ~6 months (skip last 21 days to avoid reversal)
-VOL_LOOKBACK      = 63     # 3-month vol for inverse-vol weighting
-SPY_MA            = 200    # regime filter: benchmark must be above this MA
-USE_RANKING       = True
+    # ── RSI mean-reversion ────────────────────────────────────────────────────
+    rsi_window: int = 14
+    rsi_entry: int = 30
+    rsi_exit: int = 55
 
-# Rebalance frequency
-# "MS" = monthly (first trading day of month) — best for momentum
-# "W"  = weekly
-REBALANCE_FREQ = "MS"
+    # ── Momentum / Sharpe strategy ────────────────────────────────────────────
+    top_n: int = 10  # final portfolio size
+    top_candidates: int = 20  # pre-filter pool fed into Sharpe optimiser
+    momentum_lookback: int = 126  # ~6 months; last 21 days skipped (reversal)
+    vol_lookback: int = 63  # 3-month window for vol / return estimation
+    spy_ma: int = 200  # regime filter: benchmark must be above this MA
+
+    # ── Rebalance ─────────────────────────────────────────────────────────────
+    # "MS" = first trading day of each month (best for momentum)
+    # "W"  = weekly
+    rebalance_freq: str = "MS"
+    rebal_freq: int = 21  # fallback cadence in trading days
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+    use_ranking: bool = True
+
+
+# Shared singleton — import this everywhere
+cfg = Config()
