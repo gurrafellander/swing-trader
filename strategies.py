@@ -19,7 +19,6 @@ from scipy.optimize import minimize
 
 from config import cfg
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Shared helpers
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -33,10 +32,7 @@ def _rebalance_mask(index: pd.DatetimeIndex) -> pd.Series:
     freq = "W-FRI" if cfg.rebalance_freq == "W" else cfg.rebalance_freq
     dates_only = index.normalize()
     rebalance_dates = (
-        pd.Series(1, index=dates_only)
-        .resample(freq)
-        .first()
-        .index.normalize()
+        pd.Series(1, index=dates_only).resample(freq).first().index.normalize()
     )
     return pd.Series(dates_only.isin(rebalance_dates), index=index)
 
@@ -89,9 +85,9 @@ def _sharpe_weights(return_matrix: pd.DataFrame) -> pd.Series:
     Falls back to equal weight if the optimiser does not converge.
     """
     cols = return_matrix.columns.tolist()
-    n    = len(cols)
-    mu   = return_matrix.mean().values * 252
-    cov  = return_matrix.cov().values  * 252
+    n = len(cols)
+    mu = return_matrix.mean().values * 252
+    cov = return_matrix.cov().values * 252
 
     def neg_sharpe(w: np.ndarray) -> float:
         ret = w @ mu
@@ -119,6 +115,58 @@ def _sharpe_weights(return_matrix: pd.DataFrame) -> pd.Series:
     return w
 
 
+def apply_stop_loss(
+    weights: pd.DataFrame,
+    close: pd.DataFrame,
+    stop: float = 0.05,
+) -> pd.DataFrame:
+    """
+    Post-process a target-weight matrix to inject stop-loss exits.
+
+    Tracks entry price for each open position and emits 0.0 (close) on
+    the next bar when price falls more than `stop` below entry.
+
+    Parameters
+    ----------
+    weights : target-weight DataFrame from any strategy
+    close   : the same close prices used to build weights
+    stop    : fractional loss from entry that triggers exit (default 0.05 = 5%)
+    """
+    out = weights.copy()
+    entry_price = np.full(len(close.columns), np.nan)
+    col_idx = {ticker: i for i, ticker in enumerate(close.columns)}
+    close_arr = close.to_numpy()
+    out_arr = out.to_numpy(
+        dtype=np.float32, copy=True
+    )  # work on the underlying array directly
+
+    for i in range(1, len(close)):
+        w_prev = out_arr[i - 1]
+
+        # Record entry prices for positions opened/held on previous bar
+        for j, ep in enumerate(entry_price):
+            if w_prev[j] > 0:
+                # position was active on previous bar — lock in entry if not set
+                if np.isnan(entry_price[j]):
+                    entry_price[j] = close_arr[i - 1, j]
+            elif not np.isnan(w_prev[j]):
+                # explicit 0 on previous bar → strategy closed it
+                entry_price[j] = np.nan
+
+        # Check stop loss
+        for j, ep in enumerate(entry_price):
+            if np.isnan(ep):
+                continue
+            if close_arr[i, j] <= ep * (1 - stop):
+                # Only override if strategy hasn't already acted on this bar
+                if np.isnan(out_arr[i, j]):
+                    out_arr[i, j] = 0.0
+                entry_price[j] = np.nan
+
+    # Write back — we modified out_arr in place so out already reflects changes
+    return pd.DataFrame(out_arr, index=out.index, columns=out.columns)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Strategy 1 — RSI Mean Reversion
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,15 +177,15 @@ def rsi_mean_reversion(close: pd.DataFrame) -> pd.DataFrame:
     Buy when RSI crosses below cfg.rsi_entry; sell when it crosses above
     cfg.rsi_exit (or after 10 consecutive days below 20).
     """
-    rsi      = _flatten(vbt.RSI.run(close, window=cfg.rsi_window).rsi, close)
+    rsi = _flatten(vbt.RSI.run(close, window=cfg.rsi_window).rsi, close)
     rsi_prev = rsi.shift(1)
 
     entry_cross = (rsi < cfg.rsi_entry) & (rsi_prev >= cfg.rsi_entry)
-    stuck_low   = (rsi < 20).rolling(10).sum() >= 10
-    exit_cross  = ((rsi > cfg.rsi_exit) & (rsi_prev <= cfg.rsi_exit)) | stuck_low
+    stuck_low = (rsi < 20).rolling(10).sum() >= 10
+    exit_cross = ((rsi > cfg.rsi_exit) & (rsi_prev <= cfg.rsi_exit)) | stuck_low
 
     if cfg.use_ranking:
-        score   = np.where(entry_cross.values, cfg.rsi_entry - rsi.values, np.nan)
+        score = np.where(entry_cross.values, cfg.rsi_entry - rsi.values, np.nan)
         entries = _apply_ranking(entry_cross.values, score, close)
     else:
         entries = entry_cross.values
@@ -164,34 +212,36 @@ def momentum_with_regime(
     4. Rebalance monthly.
     """
     mom_start = close.shift(21)
-    mom_end   = close.shift(cfg.momentum_lookback)
-    momentum  = (mom_start / mom_end) - 1
+    mom_end = close.shift(cfg.momentum_lookback)
+    momentum = (mom_start / mom_end) - 1
 
     daily_vol = close.pct_change().rolling(cfg.vol_lookback).std() * np.sqrt(252)
     daily_vol = daily_vol.replace(0, np.nan)
-    inv_vol   = 1.0 / daily_vol
+    inv_vol = 1.0 / daily_vol
 
-    bench_ma  = benchmark.rolling(cfg.spy_ma).mean()
+    bench_ma = benchmark.rolling(cfg.spy_ma).mean()
     market_up = (benchmark > bench_ma).reindex(close.index).fillna(False)
 
     rebalance = _rebalance_mask(close.index)
-    out = pd.DataFrame(np.nan, index=close.index, columns=close.columns, dtype=np.float32)
+    out = pd.DataFrame(
+        np.nan, index=close.index, columns=close.columns, dtype=np.float32
+    )
 
     for date in close.index[rebalance]:
         if not market_up.loc[date]:
             out.loc[date, :] = 0.0
             continue
 
-        mom_row    = momentum.loc[date]
+        mom_row = momentum.loc[date]
         invvol_row = inv_vol.loc[date]
-        valid      = mom_row.notna() & invvol_row.notna()
+        valid = mom_row.notna() & invvol_row.notna()
 
         if valid.sum() < cfg.top_n:
             out.loc[date, :] = 0.0
             continue
 
-        ranked  = mom_row[valid].rank(ascending=False)
-        top_n   = ranked[ranked <= cfg.top_n].index
+        ranked = mom_row[valid].rank(ascending=False)
+        top_n = ranked[ranked <= cfg.top_n].index
         weights = invvol_row[top_n]
         weights = weights / weights.sum()
 
@@ -226,11 +276,13 @@ def momentum_sharpe_optimised(
     )
     daily_returns = close.pct_change()
 
-    bench_ma  = benchmark.rolling(cfg.spy_ma).mean()
+    bench_ma = benchmark.rolling(cfg.spy_ma).mean()
     market_up = (benchmark > bench_ma).reindex(close.index).fillna(False)
 
     rebalance = _rebalance_mask(close.index)
-    out = pd.DataFrame(np.nan, index=close.index, columns=close.columns, dtype=np.float32)
+    out = pd.DataFrame(
+        np.nan, index=close.index, columns=close.columns, dtype=np.float32
+    )
 
     for date in close.index[rebalance]:
         if not market_up.loc[date]:
@@ -243,9 +295,9 @@ def momentum_sharpe_optimised(
             continue
 
         candidates = valid_roc.nlargest(cfg.top_candidates).index.tolist()
-        loc_i      = close.index.get_loc(date)
-        start_i    = max(0, loc_i - cfg.vol_lookback)
-        ret_window = daily_returns.iloc[start_i: loc_i + 1][candidates].dropna(axis=1)
+        loc_i = close.index.get_loc(date)
+        start_i = max(0, loc_i - cfg.vol_lookback)
+        ret_window = daily_returns.iloc[start_i : loc_i + 1][candidates].dropna(axis=1)
 
         if ret_window.shape[1] < cfg.top_n:
             out.loc[date, :] = 0.0
@@ -297,11 +349,13 @@ def rising_momentum_sharpe(close: pd.DataFrame) -> pd.DataFrame:
     roc_long = close.apply(
         lambda col: ta.roc(col, length=cfg.roc_long_lookback), axis=0
     )
-    acceleration  = roc_short - roc_long
+    acceleration = roc_short - roc_long
     daily_returns = close.pct_change()
-    rebalance     = _rebalance_mask(close.index)
+    rebalance = _rebalance_mask(close.index)
 
-    out = pd.DataFrame(np.nan, index=close.index, columns=close.columns, dtype=np.float32)
+    out = pd.DataFrame(
+        np.nan, index=close.index, columns=close.columns, dtype=np.float32
+    )
 
     for date in close.index[rebalance]:
         rs = roc_short.loc[date]
@@ -310,10 +364,11 @@ def rising_momentum_sharpe(close: pd.DataFrame) -> pd.DataFrame:
 
         # Boolean filter: accelerating, near-zero baseline, positive short-term
         rising_mask = (
-            rs.notna() & rl.notna()
-            & (rs > rl)                                    # accelerating
-            & (rl.abs() < cfg.roc_near_zero_threshold)    # near zero baseline
-            & (rs > 0)                                     # short-term positive
+            rs.notna()
+            & rl.notna()
+            & (rs > rl)  # accelerating
+            & (rl.abs() < cfg.roc_near_zero_threshold)  # near zero baseline
+            & (rs > 0)  # short-term positive
         )
 
         candidates_series = ac[rising_mask].dropna()
@@ -323,13 +378,13 @@ def rising_momentum_sharpe(close: pd.DataFrame) -> pd.DataFrame:
             continue
 
         # Rank by acceleration; cap at top_candidates for the optimiser
-        n_cands    = min(len(candidates_series), cfg.top_candidates)
+        n_cands = min(len(candidates_series), cfg.top_candidates)
         candidates = candidates_series.nlargest(n_cands).index.tolist()
 
         # Trailing return window for Sharpe optimisation
-        loc_i      = close.index.get_loc(date)
-        start_i    = max(0, loc_i - cfg.vol_lookback)
-        ret_window = daily_returns.iloc[start_i: loc_i + 1][candidates].dropna(axis=1)
+        loc_i = close.index.get_loc(date)
+        start_i = max(0, loc_i - cfg.vol_lookback)
+        ret_window = daily_returns.iloc[start_i : loc_i + 1][candidates].dropna(axis=1)
 
         # Need at least 2 stocks for a covariance matrix
         if ret_window.shape[1] < 2:
@@ -366,7 +421,9 @@ def ma_crossover(
     exit_ = (fast_ma < slow_ma).values
 
     if cfg.use_ranking:
-        score = np.where(entry, (fast_ma.values - slow_ma.values) / slow_ma.values, np.nan)
+        score = np.where(
+            entry, (fast_ma.values - slow_ma.values) / slow_ma.values, np.nan
+        )
         entry = _apply_ranking(entry, score, close)
 
     weights = _make_weights(entry, exit_, cfg.position_size)
@@ -387,9 +444,9 @@ def bollinger_mean_reversion(
     Enter when price drops below the lower Bollinger Band;
     exit when price recovers above the middle band.
     """
-    bb    = vbt.BBANDS.run(close, window=window, alpha=std)
+    bb = vbt.BBANDS.run(close, window=window, alpha=std)
     lower = _flatten(bb.lower, close)
-    mid   = _flatten(bb.middle, close)
+    mid = _flatten(bb.middle, close)
 
     entry = (close < lower).values
     exit_ = (close > mid).values
