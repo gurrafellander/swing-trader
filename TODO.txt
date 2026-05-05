@@ -1,4 +1,0 @@
-make universe bigger (IMPORTANT)
-try rebalancing biweekly or weekly (is it worth it?)
-make a script for generating the newest signals for usage
-add rebalancing to calendar
