@@ -1,5 +1,11 @@
 venv/
 __pycache__/
-
 *.html
 *.csv
+ 
+# Docker image export — too large for git, distribute via USB
+*.tar
+ 
+# Signals output files
+signals_*.csv
+all_stats.csv
