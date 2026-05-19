@@ -82,6 +82,19 @@ All allocation, RSI parameters, and limits are centralized there.
 
 ---
 
+## Docker
+
+The `.tar` image is not in the repo (too large). Build it locally:
+
+    docker build -f install/Dockerfile -t signal-generator .
+    docker save signal-generator -o install/signal-generator.tar
+
+Then run:
+
+    docker run -d --name signal-generator -p 5000:5000 signal-generator
+
+---
+
 ## Extend
 
 You can:
