@@ -11,625 +11,418 @@ Usage
 """
 
 from flask import Flask, render_template_string, request, jsonify
-from datetime import date
+from datetime import date, timedelta
 import traceback
+import math
 
 from generate_signals import generate_signals
+from DataLoader import DataLoader
+from config import cfg
 
 app = Flask(__name__)
 
-HTML = """<!DOCTYPE html>
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Signal Generator — Rising Momentum + Sharpe</title>
+<title>Signal Generator</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg:        #0d0f0e;
-    --surface:   #131614;
-    --border:    #1f2421;
-    --border-hi: #2a3330;
-    --text:      #c8d5c9;
-    --muted:     #556b57;
+    --surface:   #111412;
+    --surface2:  #161917;
+    --border:    #1e2420;
+    --border-hi: #283229;
+    --text:      #c4d4c5;
+    --muted:     #4e6450;
     --accent:    #3dffa0;
-    --accent-dim:#1a6644;
+    --accent-dim:#1a5e40;
     --warn:      #f0c040;
     --danger:    #ff5f5f;
     --mono:      'IBM Plex Mono', monospace;
     --sans:      'IBM Plex Sans', sans-serif;
+    --r:         4px;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.55; }
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 13px;
-    min-height: 100vh;
-    line-height: 1.6;
+  body::after {
+    content: ''; position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.025) 2px, rgba(0,0,0,0.025) 4px);
+    pointer-events: none; z-index: 9999;
   }
 
-  /* Subtle scanline overlay */
-  body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background: repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 2px,
-      rgba(0,0,0,0.03) 2px,
-      rgba(0,0,0,0.03) 4px
-    );
-    pointer-events: none;
-    z-index: 999;
-  }
+  header { border-bottom: 1px solid var(--border); padding: 16px 28px; display: flex; align-items: center; gap: 14px; }
+  .logo { font-size: 11px; letter-spacing: .2em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+  .logo-sub { font-size: 11px; color: var(--muted); font-family: var(--sans); font-weight: 300; }
 
-  header {
-    border-bottom: 1px solid var(--border);
-    padding: 20px 32px;
-    display: flex;
-    align-items: baseline;
-    gap: 16px;
-  }
+  .layout { display: grid; grid-template-columns: 268px 1fr; height: calc(100vh - 49px); overflow: hidden; }
 
-  header .logo {
-    font-size: 11px;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--accent);
-    font-weight: 600;
-  }
+  aside { border-right: 1px solid var(--border); padding: 24px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 24px; }
+  main  { padding: 24px 28px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
 
-  header .subtitle {
-    font-size: 11px;
-    color: var(--muted);
-    font-family: var(--sans);
-    font-weight: 300;
-    letter-spacing: 0.05em;
-  }
+  .sec-label { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
 
-  .layout {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    min-height: calc(100vh - 57px);
-  }
-
-  /* ── Sidebar ── */
-  aside {
-    border-right: 1px solid var(--border);
-    padding: 28px 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 28px;
-  }
-
-  .section-label {
-    font-size: 10px;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 12px;
-  }
-
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-bottom: 16px;
-  }
-
-  .field label {
-    font-size: 11px;
-    color: var(--muted);
-    letter-spacing: 0.08em;
-  }
-
+  .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+  .field label { font-size: 10px; color: var(--muted); letter-spacing: .08em; }
   .field input {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 13px;
-    padding: 9px 12px;
-    border-radius: 3px;
-    outline: none;
-    transition: border-color 0.15s;
-    width: 100%;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    font-family: var(--mono); font-size: 13px; padding: 8px 11px; border-radius: var(--r);
+    outline: none; width: 100%; transition: border-color .15s, box-shadow .15s;
   }
-
-  .field input:focus {
-    border-color: var(--accent-dim);
-    box-shadow: 0 0 0 1px var(--accent-dim);
-  }
-
+  .field input:focus { border-color: var(--accent-dim); box-shadow: 0 0 0 1px var(--accent-dim); }
   .field input::placeholder { color: var(--muted); }
 
   .btn-run {
-    background: var(--accent);
-    color: #061a0e;
-    border: none;
-    font-family: var(--mono);
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    padding: 12px 0;
-    width: 100%;
-    border-radius: 3px;
-    cursor: pointer;
-    transition: background 0.15s, transform 0.1s;
-    margin-top: 4px;
+    background: var(--accent); color: #061a0e; border: none; font-family: var(--mono);
+    font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+    padding: 11px 0; width: 100%; border-radius: var(--r); cursor: pointer;
+    transition: background .12s, transform .1s;
   }
+  .btn-run:hover  { background: #5fffc0; }
+  .btn-run:active { transform: scale(.98); }
+  .btn-run:disabled { background: var(--accent-dim); color: var(--muted); cursor: not-allowed; }
 
-  .btn-run:hover  { background: #5fffb8; }
-  .btn-run:active { transform: scale(0.98); }
-  .btn-run:disabled {
-    background: var(--accent-dim);
-    color: var(--muted);
-    cursor: not-allowed;
-  }
+  hr.div { border: none; border-top: 1px solid var(--border); }
 
-  .divider {
-    border: none;
-    border-top: 1px solid var(--border);
-  }
+  .cfg-row { display: flex; justify-content: space-between; font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .cfg-row:last-child { border-bottom: none; }
+  .cfg-k { color: var(--muted); }
+  .cfg-v { color: var(--text); font-weight: 500; }
 
-  /* Config display */
-  .config-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    padding: 4px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .config-row:last-child { border-bottom: none; }
-  .config-key   { color: var(--muted); }
-  .config-value { color: var(--text); font-weight: 500; }
+  .status { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; height: 16px; }
+  .status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .status.running .dot { background: var(--warn); animation: blink .7s infinite; }
+  .status.ok  .dot { background: var(--accent); }
+  .status.err .dot { background: var(--danger); }
+  .status.ok  { color: var(--accent); }
+  .status.err { color: var(--danger); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.2} }
 
-  /* ── Main content ── */
-  main {
-    padding: 28px 32px;
-    display: flex;
-    flex-direction: column;
-    gap: 24px;
-  }
+  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 13px 15px; opacity: 0; transform: translateY(5px); transition: opacity .28s, transform .28s; }
+  .card.vis { opacity: 1; transform: translateY(0); }
+  .card-label { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin-bottom: 5px; }
+  .card-val { font-size: 19px; font-weight: 500; letter-spacing: -.02em; color: var(--accent); }
+  .card-val.warn  { color: var(--warn); }
+  .card-val.neg   { color: var(--danger); }
+  .card-val.neu   { color: var(--text); }
+  .card-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
 
-  .status-bar {
-    font-size: 11px;
-    color: var(--muted);
-    height: 18px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
+  .meta { display: flex; gap: 20px; flex-wrap: wrap; font-size: 11px; color: var(--muted); padding: 9px 13px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); opacity: 0; transition: opacity .3s .1s; }
+  .meta.vis { opacity: 1; }
+  .meta b { color: var(--text); font-weight: 500; }
+  .meta b.pos { color: var(--accent); }
+  .meta b.neg { color: var(--danger); }
 
-  .status-bar .dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--muted);
-    flex-shrink: 0;
-  }
-  .status-bar.running .dot { background: var(--warn); animation: pulse 0.8s infinite; }
-  .status-bar.ok .dot      { background: var(--accent); }
-  .status-bar.error .dot   { background: var(--danger); }
-  .status-bar.ok    { color: var(--accent); }
-  .status-bar.error { color: var(--danger); }
+  .err-box { background: rgba(255,95,95,.06); border: 1px solid rgba(255,95,95,.22); border-radius: var(--r); padding: 14px 18px; font-size: 12px; color: var(--danger); white-space: pre-wrap; display: none; }
+  .err-box.vis { display: block; }
 
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0.3; }
-  }
+  .tbl-wrap { overflow-x: auto; opacity: 0; transform: translateY(6px); transition: opacity .32s .18s, transform .32s .18s; }
+  .tbl-wrap.vis { opacity: 1; transform: translateY(0); }
 
-  /* Summary cards */
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-  }
-
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 14px 16px;
-    opacity: 0;
-    transform: translateY(6px);
-    transition: opacity 0.3s, transform 0.3s;
-  }
-  .card.visible { opacity: 1; transform: translateY(0); }
-
-  .card-label {
-    font-size: 10px;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 6px;
-  }
-
-  .card-value {
-    font-size: 20px;
-    font-weight: 500;
-    color: var(--accent);
-    letter-spacing: -0.02em;
-  }
-
-  .card-sub {
-    font-size: 10px;
-    color: var(--muted);
-    margin-top: 2px;
-  }
-
-  /* Metadata strip */
-  .meta-strip {
-    display: flex;
-    gap: 24px;
-    font-size: 11px;
-    color: var(--muted);
-    padding: 10px 14px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    opacity: 0;
-    transition: opacity 0.3s 0.15s;
-  }
-  .meta-strip.visible { opacity: 1; }
-  .meta-strip span b { color: var(--text); font-weight: 500; }
-
-  /* Table */
-  .table-wrap {
-    overflow-x: auto;
-    opacity: 0;
-    transform: translateY(8px);
-    transition: opacity 0.35s 0.2s, transform 0.35s 0.2s;
-  }
-  .table-wrap.visible { opacity: 1; transform: translateY(0); }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
 
   thead th {
-    text-align: left;
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--muted);
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
+    text-align: left; font-size: 9px; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--muted); padding: 7px 12px; border-bottom: 1px solid var(--border);
+    white-space: nowrap; cursor: pointer; user-select: none;
   }
+  thead th:hover { color: var(--text); }
+  thead th.r { text-align: right; }
+  thead th .arr { margin-left: 4px; opacity: .35; }
+  thead th.sorted .arr { opacity: 1; color: var(--accent); }
 
-  thead th.num { text-align: right; }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background .08s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: rgba(61,255,160,.025); }
+  td { padding: 9px 12px; white-space: nowrap; }
+  td.r { text-align: right; }
 
-  tbody tr {
-    border-bottom: 1px solid var(--border);
-    transition: background 0.1s;
-  }
-  tbody tr:hover { background: rgba(61,255,160,0.03); }
+  .tkr { font-weight: 600; color: var(--accent); letter-spacing: .06em; }
 
-  tbody td {
-    padding: 10px 14px;
-    white-space: nowrap;
-  }
-  tbody td.num { text-align: right; }
+  .wbar-cell { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .wbar { height: 3px; border-radius: 2px; background: var(--accent); opacity: .4; min-width: 1px; }
 
-  .ticker-cell {
-    font-weight: 500;
-    color: var(--accent);
-    letter-spacing: 0.06em;
-  }
+  .pos { color: var(--accent); }
+  .neg { color: var(--danger); }
+  .wrn { color: var(--warn); }
+  .neu { color: var(--text); }
 
-  .weight-bar-wrap {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    justify-content: flex-end;
-  }
+  .sp { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .sp.hi  { background: rgba(61,255,160,.1);  color: var(--accent); border: 1px solid rgba(61,255,160,.2); }
+  .sp.med { background: rgba(240,192,64,.08); color: var(--warn);   border: 1px solid rgba(240,192,64,.2); }
+  .sp.low { background: rgba(255,95,95,.07);  color: var(--danger); border: 1px solid rgba(255,95,95,.2); }
 
-  .weight-bar {
-    height: 3px;
-    background: var(--accent);
-    border-radius: 2px;
-    min-width: 2px;
-    opacity: 0.5;
-  }
-
-  /* Error box */
-  .error-box {
-    background: rgba(255,95,95,0.07);
-    border: 1px solid rgba(255,95,95,0.25);
-    border-radius: 4px;
-    padding: 16px 20px;
-    font-size: 12px;
-    color: var(--danger);
-    white-space: pre-wrap;
-    display: none;
-  }
-  .error-box.visible { display: block; }
-
-  /* Empty state */
-  .empty {
-    color: var(--muted);
-    font-size: 12px;
-    padding: 40px 0;
-    text-align: center;
-    letter-spacing: 0.05em;
-  }
-
-  .empty .prompt {
-    font-size: 32px;
-    margin-bottom: 10px;
-    opacity: 0.15;
-  }
+  .empty { color: var(--muted); font-size: 12px; padding: 48px 0; text-align: center; letter-spacing: .05em; }
+  .empty .glyph { font-size: 36px; margin-bottom: 10px; opacity: .12; }
 </style>
 </head>
 <body>
 
 <header>
   <span class="logo">Signal Generator</span>
-  <span class="subtitle">Rising Momentum + Sharpe &nbsp;/&nbsp; OMXS + Global Universe</span>
+  <span class="logo-sub">Rising Momentum + Sharpe &nbsp;/&nbsp; OMXS + Global</span>
 </header>
 
 <div class="layout">
-
-  <!-- Sidebar -->
-  <aside>
-    <div>
-      <div class="section-label">Parameters</div>
-
-      <div class="field">
-        <label>AS OF DATE</label>
-        <input type="date" id="inp-date" value="" />
-      </div>
-
-      <div class="field">
-        <label>PORTFOLIO VALUE (SEK)</label>
-        <input type="number" id="inp-value" placeholder="e.g. 500000" min="1000" step="1000" />
-      </div>
-
-      <button class="btn-run" id="btn-run" onclick="runSignals()">
-        Run &#x25B6;
-      </button>
+<aside>
+  <div>
+    <div class="sec-label">Parameters</div>
+    <div class="field">
+      <label>AS OF DATE</label>
+      <input type="date" id="inp-date" />
     </div>
-
-    <hr class="divider" />
-
-    <div>
-      <div class="section-label">Strategy Config</div>
-      <div id="cfg-table">
-        <!-- filled by /api/config -->
-        <div class="config-row"><span class="config-key">loading…</span></div>
-      </div>
+    <div class="field">
+      <label>PORTFOLIO VALUE (SEK)</label>
+      <input type="number" id="inp-value" placeholder="e.g. 500 000" min="1000" step="1000" />
     </div>
-  </aside>
+    <button class="btn-run" id="btn-run" onclick="runSignals()">Run &#x25B6;</button>
+  </div>
+  <hr class="div" />
+  <div>
+    <div class="sec-label">Strategy Config</div>
+    <div id="cfg-table"><div class="cfg-row"><span class="cfg-k">loading…</span></div></div>
+  </div>
+</aside>
 
-  <!-- Main -->
-  <main>
-    <div class="status-bar" id="status-bar">
-      <div class="dot"></div>
-      <span id="status-text">awaiting input</span>
+<main>
+  <div class="status" id="status"><div class="dot"></div><span id="status-txt">awaiting input</span></div>
+  <div class="err-box" id="err-box"></div>
+
+  <div class="cards" id="cards" style="display:none">
+    <div class="card" id="c-pos">
+      <div class="card-label">Positions</div>
+      <div class="card-val" id="cv-pos">—</div>
+      <div class="card-sub">selected stocks</div>
     </div>
-
-    <div id="error-box" class="error-box"></div>
-
-    <!-- Summary cards (hidden until result) -->
-    <div class="cards" id="cards" style="display:none">
-      <div class="card" id="card-positions">
-        <div class="card-label">Positions</div>
-        <div class="card-value" id="cv-positions">—</div>
-        <div class="card-sub">selected stocks</div>
-      </div>
-      <div class="card" id="card-invested">
-        <div class="card-label">Invested</div>
-        <div class="card-value" id="cv-invested">—</div>
-        <div class="card-sub" id="cs-invested-pct">of portfolio</div>
-      </div>
-      <div class="card" id="card-cash">
-        <div class="card-label">Cash Left</div>
-        <div class="card-value" id="cv-cash">—</div>
-        <div class="card-sub">uninvested</div>
-      </div>
-      <div class="card" id="card-date">
-        <div class="card-label">Signal Date</div>
-        <div class="card-value" id="cv-date" style="font-size:14px">—</div>
-        <div class="card-sub" id="cs-price-date">prices from —</div>
-      </div>
+    <div class="card" id="c-sharpe">
+      <div class="card-label">Port. Sharpe</div>
+      <div class="card-val" id="cv-sharpe">—</div>
+      <div class="card-sub">weighted avg</div>
     </div>
-
-    <!-- Meta strip -->
-    <div class="meta-strip" id="meta-strip">
-      <span>Rebalance: <b id="m-rebal">—</b></span>
-      <span>Price date: <b id="m-price">—</b></span>
-      <span>Universe: <b id="m-universe">—</b></span>
-      <span>Total weight: <b id="m-weight">—</b></span>
+    <div class="card" id="c-ret">
+      <div class="card-label">Port. Ann. Return</div>
+      <div class="card-val" id="cv-ret">—</div>
+      <div class="card-sub">weighted avg</div>
     </div>
-
-    <!-- Table -->
-    <div class="table-wrap" id="table-wrap">
-      <div class="empty" id="empty-state">
-        <div class="prompt">//</div>
-        enter a date and portfolio value, then run
-      </div>
-      <table id="result-table" style="display:none">
-        <thead>
-          <tr>
-            <th>Ticker</th>
-            <th class="num">Weight %</th>
-            <th class="num">Target SEK</th>
-            <th class="num">Price</th>
-            <th class="num">Shares</th>
-            <th class="num">Actual SEK</th>
-            <th class="num">Δ Weight pp</th>
-          </tr>
-        </thead>
-        <tbody id="result-body"></tbody>
-      </table>
+    <div class="card" id="c-vol">
+      <div class="card-label">Port. Ann. Vol</div>
+      <div class="card-val neu" id="cv-vol">—</div>
+      <div class="card-sub">weighted avg</div>
     </div>
+    <div class="card" id="c-cash">
+      <div class="card-label">Cash Left</div>
+      <div class="card-val neu" id="cv-cash">—</div>
+      <div class="card-sub" id="cs-cash-pct">uninvested</div>
+    </div>
+  </div>
 
-  </main>
+  <div class="meta" id="meta">
+    <span>Signal date: <b id="m-sig">—</b></span>
+    <span>Price date: <b id="m-price">—</b></span>
+    <span>Universe: <b id="m-uni">—</b> tickers</span>
+    <span>Total invested: <b id="m-inv">—</b></span>
+    <span>Current value: <b id="m-curr">—</b></span>
+    <span>Gains: <b id="m-gains">—</b></span>
+  </div>
+
+  <div class="tbl-wrap" id="tbl-wrap">
+    <div class="empty" id="empty"><div class="glyph">//</div>enter a date and portfolio value, then run</div>
+    <table id="tbl" style="display:none">
+      <thead id="thead">
+        <tr>
+          <th data-key="ticker">Ticker <span class="arr">↕</span></th>
+          <th class="r" data-key="weight_pct">Weight % <span class="arr">↕</span></th>
+          <th class="r" data-key="sharpe">Sharpe <span class="arr">↕</span></th>
+          <th class="r" data-key="ann_return">Ann Ret % <span class="arr">↕</span></th>
+          <th class="r" data-key="ann_vol">Ann Vol % <span class="arr">↕</span></th>
+          <th class="r" data-key="max_dd">Max DD % <span class="arr">↕</span></th>
+          <th class="r" data-key="acceleration">Accel pp <span class="arr">↕</span></th>
+          <th class="r" data-key="signal_day_price">Signal Price <span class="arr">↕</span></th>
+          <th class="r" data-key="current_day_price">Current Price <span class="arr">↕</span></th>
+          <th class="r" data-key="shares">Shares <span class="arr">↕</span></th>
+          <th class="r" data-key="actual_sek">Actual SEK <span class="arr">↕</span></th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</main>
 </div>
 
 <script>
-// Set default date to today
 document.getElementById('inp-date').value = new Date().toISOString().split('T')[0];
 
-// Load config on startup
-fetch('/api/config')
-  .then(r => r.json())
-  .then(cfg => {
-    const el = document.getElementById('cfg-table');
-    el.innerHTML = '';
-    for (const [k, v] of Object.entries(cfg)) {
-      el.innerHTML += `<div class="config-row">
-        <span class="config-key">${k}</span>
-        <span class="config-value">${v}</span>
-      </div>`;
-    }
-  })
-  .catch(() => {
-    document.getElementById('cfg-table').innerHTML =
-      '<div class="config-row"><span class="config-key">config unavailable</span></div>';
+fetch('/api/config').then(r=>r.json()).then(cfg=>{
+  const el = document.getElementById('cfg-table');
+  el.innerHTML = Object.entries(cfg)
+    .map(([k,v])=>`<div class="cfg-row"><span class="cfg-k">${k}</span><span class="cfg-v">${v}</span></div>`)
+    .join('');
+}).catch(()=>{
+  document.getElementById('cfg-table').innerHTML='<div class="cfg-row"><span class="cfg-k">unavailable</span></div>';
+});
+
+// Sort setup
+let _positions=[], _sortKey='weight_pct', _sortAsc=false;
+
+document.querySelectorAll('#thead th').forEach(th=>{
+  th.addEventListener('click',()=>{
+    const key=th.dataset.key;
+    if(_sortKey===key) _sortAsc=!_sortAsc;
+    else { _sortKey=key; _sortAsc=(key==='ticker'); }
+    document.querySelectorAll('#thead th').forEach(t=>{ t.classList.remove('sorted'); t.querySelector('.arr').textContent='↕'; });
+    th.classList.add('sorted');
+    th.querySelector('.arr').textContent=_sortAsc?'↑':'↓';
+    renderTable();
   });
+});
 
-function setStatus(state, text) {
-  const bar = document.getElementById('status-bar');
-  const txt = document.getElementById('status-text');
-  bar.className = 'status-bar ' + state;
-  txt.textContent = text;
+function setStatus(s,txt){
+  const el=document.getElementById('status');
+  el.className='status '+s;
+  document.getElementById('status-txt').textContent=txt;
 }
 
-function fmtSEK(v) {
-  return new Intl.NumberFormat('sv-SE', {
-    style: 'decimal', maximumFractionDigits: 0
-  }).format(v) + ' SEK';
+function fmtSEK(v){ return new Intl.NumberFormat('sv-SE',{maximumFractionDigits:0}).format(v)+' SEK'; }
+
+function sharpePill(s){
+  if(s===null||s===undefined) return '<span class="sp low">n/a</span>';
+  const cls=s>=1?'hi':s>=0.5?'med':'low';
+  return `<span class="sp ${cls}">${s.toFixed(2)}</span>`;
 }
 
-function showCards(data) {
-  document.getElementById('cards').style.display = 'grid';
-  document.getElementById('meta-strip').classList.add('visible');
+function colNum(v,higherBetter,fmt){
+  if(v===null||v===undefined) return '<span class="neu">—</span>';
+  fmt=fmt||(x=>x.toFixed(2));
+  const good=higherBetter?v>0:v<0;
+  return `<span class="${good?'pos':'neg'}">${v>0?'+':''}${fmt(v)}</span>`;
+}
 
-  const positions = data.positions.length;
-  const invested  = data.positions.reduce((s, r) => s + r.actual_sek, 0);
-  const pct       = (invested / data.portfolio_value * 100).toFixed(1);
+function portMetrics(pos){
+  let tw=0,ws=0,wr=0,wv=0;
+  for(const p of pos){ const w=p.weight_pct/100; tw+=w; if(p.sharpe!=null)ws+=w*p.sharpe; if(p.ann_return!=null)wr+=w*p.ann_return; if(p.ann_vol!=null)wv+=w*p.ann_vol; }
+  return tw>0?{sharpe:ws/tw,ann_return:wr/tw,ann_vol:wv/tw}:{sharpe:null,ann_return:null,ann_vol:null};
+}
 
-  document.getElementById('cv-positions').textContent = positions;
-  document.getElementById('cv-invested').textContent  = fmtSEK(invested);
-  document.getElementById('cs-invested-pct').textContent = pct + '% of portfolio';
-  document.getElementById('cv-cash').textContent      = fmtSEK(data.cash_left);
-  document.getElementById('cv-date').textContent      = data.signal_date;
-  document.getElementById('cs-price-date').textContent = 'prices from ' + data.price_date;
+function showCards(data){
+  document.getElementById('cards').style.display='grid';
+  document.getElementById('meta').classList.add('vis');
+  const pm=portMetrics(data.positions);
+  const invested=data.positions.reduce((s,r)=>s+r.actual_sek,0);
+  const cashPct=(data.cash_left/data.portfolio_value*100).toFixed(1);
 
-  document.getElementById('m-rebal').textContent    = data.signal_date;
-  document.getElementById('m-price').textContent    = data.price_date;
-  document.getElementById('m-universe').textContent = data.universe_size + ' tickers';
-  const totalW = data.positions.reduce((s, r) => s + r.weight_pct, 0);
-  document.getElementById('m-weight').textContent  = totalW.toFixed(2) + '%';
+  document.getElementById('cv-pos').textContent=data.positions.length;
 
-  // Stagger card reveals
-  ['card-positions','card-invested','card-cash','card-date'].forEach((id, i) => {
-    setTimeout(() => document.getElementById(id).classList.add('visible'), i * 60);
+  const sEl=document.getElementById('cv-sharpe');
+  sEl.textContent=pm.sharpe!=null?pm.sharpe.toFixed(2):'—';
+  sEl.className='card-val '+(pm.sharpe>=1?'pos':pm.sharpe>=0.5?'warn':'neg');
+
+  const rEl=document.getElementById('cv-ret');
+  rEl.textContent=pm.ann_return!=null?(pm.ann_return>0?'+':'')+pm.ann_return.toFixed(1)+'%':'—';
+  rEl.className='card-val '+(pm.ann_return>=0?'':'warn');
+
+  document.getElementById('cv-vol').textContent=pm.ann_vol!=null?pm.ann_vol.toFixed(1)+'%':'—';
+  document.getElementById('cv-cash').textContent=fmtSEK(data.cash_left);
+  document.getElementById('cs-cash-pct').textContent=cashPct+'% uninvested';
+
+  document.getElementById('m-sig').textContent=data.signal_date;
+  document.getElementById('m-price').textContent=data.price_date;
+  document.getElementById('m-uni').textContent=data.universe_size;
+  document.getElementById('m-inv').textContent=fmtSEK(invested);
+  
+  const currEl=document.getElementById('m-curr');
+  currEl.textContent=fmtSEK(data.current_value);
+  currEl.className=data.gains_sek>=0?'pos':'neg';
+  
+  const gainsEl=document.getElementById('m-gains');
+  gainsEl.textContent=(data.gains_sek>=0?'+':'')+fmtSEK(data.gains_sek);
+  gainsEl.className=data.gains_sek>=0?'pos':'neg';
+
+  ['c-pos','c-sharpe','c-ret','c-vol','c-cash'].forEach((id,i)=>{
+    setTimeout(()=>document.getElementById(id).classList.add('vis'),i*55);
   });
 }
 
-function maxWeight(positions) {
-  return Math.max(...positions.map(r => r.weight_pct));
-}
-
-function buildTable(positions) {
-  const tbody = document.getElementById('result-body');
-  tbody.innerHTML = '';
-  const maxW = maxWeight(positions);
-
-  positions.forEach(row => {
-    const barWidth = Math.round((row.weight_pct / maxW) * 60);
-    const delta    = row.delta_weight_pp;
-    const deltaCol = Math.abs(delta) < 0.1 ? 'var(--muted)' :
-                     delta > 0 ? 'var(--warn)' : 'var(--accent)';
-
-    tbody.innerHTML += `<tr>
-      <td class="ticker-cell">${row.ticker}</td>
-      <td class="num">
-        <div class="weight-bar-wrap">
-          <span>${row.weight_pct.toFixed(2)}</span>
-          <div class="weight-bar" style="width:${barWidth}px"></div>
-        </div>
-      </td>
-      <td class="num">${row.target_sek.toLocaleString('sv-SE', {maximumFractionDigits:0})}</td>
-      <td class="num">${row.price_sek.toLocaleString('sv-SE', {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
-      <td class="num" style="font-weight:600;color:var(--accent)">${row.shares}</td>
-      <td class="num">${row.actual_sek.toLocaleString('sv-SE', {maximumFractionDigits:0})}</td>
-      <td class="num" style="color:${deltaCol}">${delta > 0 ? '+' : ''}${delta.toFixed(3)}</td>
+function renderTable(){
+  const sorted=[..._positions].sort((a,b)=>{
+    const va=a[_sortKey],vb=b[_sortKey];
+    if(typeof va==='string') return _sortAsc?va.localeCompare(vb):vb.localeCompare(va);
+    const an=(va===null||va===undefined)?-Infinity:va;
+    const bn=(vb===null||vb===undefined)?-Infinity:vb;
+    return _sortAsc?an-bn:bn-an;
+  });
+  const maxW=Math.max(...sorted.map(r=>r.weight_pct));
+  document.getElementById('tbody').innerHTML=sorted.map(r=>{
+    const barW=Math.round((r.weight_pct/maxW)*56);
+    // Calculate price change
+    const signalPrice=r.signal_day_price;
+    const currentPrice=r.current_day_price;
+    let priceChangePct=null;
+    if(signalPrice!=null && currentPrice!=null && signalPrice>0) priceChangePct=(currentPrice-signalPrice)/signalPrice*100;
+    
+    return `<tr>
+      <td class="tkr">${r.ticker}</td>
+      <td class="r"><div class="wbar-cell"><span>${r.weight_pct.toFixed(2)}</span><div class="wbar" style="width:${barW}px"></div></div></td>
+      <td class="r">${sharpePill(r.sharpe)}</td>
+      <td class="r">${colNum(r.ann_return,true,x=>x.toFixed(1)+'%')}</td>
+      <td class="r">${r.ann_vol!=null?r.ann_vol.toFixed(1)+'%':'—'}</td>
+      <td class="r">${colNum(r.max_dd,false,x=>x.toFixed(1)+'%')}</td>
+      <td class="r">${colNum(r.acceleration,true,x=>x.toFixed(2))}</td>
+      <td class="r">${signalPrice!=null?signalPrice.toLocaleString('sv-SE',{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</td>
+      <td class="r">${currentPrice!=null?(priceChangePct!=null?`<span class="${priceChangePct>=0?'pos':'neg'}">${currentPrice.toLocaleString('sv-SE',{minimumFractionDigits:2,maximumFractionDigits:2})} (${priceChangePct>=0?'+':''}${priceChangePct.toFixed(1)}%)</span>`:`<span class="neu">${currentPrice.toLocaleString('sv-SE',{minimumFractionDigits:2,maximumFractionDigits:2})}</span>`):'—'}</td>
+      <td class="r" style="font-weight:600;color:var(--accent)">${r.shares}</td>
+      <td class="r">${r.actual_sek!=null?r.actual_sek.toLocaleString('sv-SE',{maximumFractionDigits:0}):'—'}</td>
     </tr>`;
-  });
+  }).join('');
 }
 
-async function runSignals() {
-  const dateVal  = document.getElementById('inp-date').value;
-  const valueVal = document.getElementById('inp-value').value;
+async function runSignals(){
+  const dateVal=document.getElementById('inp-date').value;
+  const valVal=document.getElementById('inp-value').value;
+  if(!dateVal||!valVal||parseFloat(valVal)<=0){ setStatus('err','enter a valid date and portfolio value'); return; }
 
-  if (!dateVal || !valueVal || parseFloat(valueVal) <= 0) {
-    setStatus('error', 'please enter a valid date and portfolio value');
-    return;
-  }
+  document.getElementById('err-box').classList.remove('vis');
+  document.getElementById('tbl').style.display='none';
+  document.getElementById('empty').style.display='none';
+  document.getElementById('cards').style.display='none';
+  document.getElementById('meta').classList.remove('vis');
+  document.getElementById('tbl-wrap').classList.remove('vis');
+  ['c-pos','c-sharpe','c-ret','c-vol','c-cash'].forEach(id=>document.getElementById(id).classList.remove('vis'));
 
-  // Reset UI
-  document.getElementById('error-box').classList.remove('visible');
-  document.getElementById('result-table').style.display = 'none';
-  document.getElementById('empty-state').style.display  = 'none';
-  document.getElementById('cards').style.display = 'none';
-  document.getElementById('meta-strip').classList.remove('visible');
-  document.getElementById('table-wrap').classList.remove('visible');
-  ['card-positions','card-invested','card-cash','card-date'].forEach(id =>
-    document.getElementById(id).classList.remove('visible')
-  );
+  const btn=document.getElementById('btn-run');
+  btn.disabled=true;
+  setStatus('running','downloading data and computing signals…');
 
-  const btn = document.getElementById('btn-run');
-  btn.disabled = true;
-  setStatus('running', 'downloading data and computing signals…');
+  try{
+    const resp=await fetch('/api/signals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:dateVal,value:parseFloat(valVal)})});
+    const data=await resp.json();
+    if(!resp.ok||data.error) throw new Error(data.error||'server error');
 
-  try {
-    const resp = await fetch('/api/signals', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: dateVal, value: parseFloat(valueVal) })
-    });
-
-    const data = await resp.json();
-
-    if (!resp.ok || data.error) {
-      throw new Error(data.error || 'unknown server error');
-    }
+    _positions=data.positions;
+    _sortKey='weight_pct'; _sortAsc=false;
 
     showCards(data);
-    buildTable(data.positions);
+    renderTable();
+    document.getElementById('tbl').style.display='table';
+    document.getElementById('tbl-wrap').classList.add('vis');
 
-    document.getElementById('result-table').style.display = 'table';
-    document.getElementById('table-wrap').classList.add('visible');
-
-    setStatus('ok', `${data.positions.length} positions computed  ·  signal date ${data.signal_date}`);
-
-  } catch (err) {
-    const box = document.getElementById('error-box');
-    box.textContent = 'Error: ' + err.message;
-    box.classList.add('visible');
-    document.getElementById('empty-state').style.display = 'block';
-    setStatus('error', err.message);
-  } finally {
-    btn.disabled = false;
-  }
+    const pm=portMetrics(data.positions);
+    setStatus('ok',`${data.positions.length} positions  ·  port. Sharpe ${pm.sharpe!=null?pm.sharpe.toFixed(2):'n/a'}  ·  signal ${data.signal_date}`);
+  }catch(err){
+    const box=document.getElementById('err-box');
+    box.textContent='Error: '+err.message;
+    box.classList.add('vis');
+    document.getElementById('empty').style.display='block';
+    setStatus('err',err.message);
+  }finally{ btn.disabled=false; }
 }
 
-// Allow Enter key to trigger run
-document.addEventListener('keydown', e => {
-  if (e.key === 'Enter') runSignals();
-});
+document.addEventListener('keydown',e=>{ if(e.key==='Enter') runSignals(); });
 </script>
 </body>
 </html>
@@ -643,7 +436,6 @@ def index():
 
 @app.route("/api/config")
 def api_config():
-    """Return relevant strategy config values for display in the sidebar."""
     try:
         from config import cfg
 
@@ -666,7 +458,6 @@ def api_config():
 
 @app.route("/api/signals", methods=["POST"])
 def api_signals():
-    """Run generate_signals and return structured JSON."""
     body = request.get_json(force=True)
     try:
         signal_date = date.fromisoformat(body["date"])
@@ -682,46 +473,156 @@ def api_signals():
     if not isinstance(result, tuple):
         return jsonify({"error": "Strategy returned no positions for this date."}), 200
 
-    out_full, actual_date, cash_left = result
+    out_full, actual_date, cash_left, close, metrics = result
 
-    # Strip summary rows — keep only real positions
     positions_df = out_full[
-        ~out_full["Ticker"].str.startswith("──")
+        ~out_full["Ticker"].str.startswith("--")
         & (out_full["Ticker"] != "Cash (leftover)")
     ].copy()
+    # Also filter the unicode dash variant
+    positions_df = positions_df[~positions_df["Ticker"].str.startswith("\u2500")].copy()
+
+    def _f(v):
+        try:
+            f = float(v)
+            return None if math.isnan(f) else round(f, 6)
+        except (TypeError, ValueError):
+            return None
+
+    # Calculate portfolio value at signal date and current date
+    # Try to find the signal date in the close index
+    signal_date_idx = None
+    for idx, ts in enumerate(close.index):
+        if ts.date() == actual_date:
+            signal_date_idx = idx
+            break
+
+    # Calculate portfolio value at signal date
+    portfolio_value_at_signal = cash_left  # Start with leftover cash
+    print(f"  Signal date index: {signal_date_idx}")
+    if signal_date_idx is not None:
+        signal_prices = close.iloc[signal_date_idx]
+        print(f"  Using signal prices from index {signal_date_idx}")
+        for _, row in positions_df.iterrows():
+            tkr = row["Ticker"]
+            shares = int(row["Shares"])
+            if tkr in signal_prices.index and shares > 0:
+                signal_price = signal_prices[tkr]
+                if not (isinstance(signal_price, float) and math.isnan(signal_price)):
+                    portfolio_value_at_signal += shares * signal_price
+    else:
+        # If signal date not found, use actual_sek from positions
+        print(f"  Signal date not found in close index, using actual_sek fallback")
+        portfolio_value_at_signal = cash_left + positions_df["Actual SEK"].sum()
+        print(f"  Actual SEK sum: {positions_df['Actual SEK'].sum():.2f}")
+
+    # Fetch current prices (from signal date to today)
+    # Download additional data to get current prices beyond the signal date
+    latest_prices = None
+    try:
+        today = date.today()
+        # Add a few days buffer to ensure we get the most recent trading day
+        end_date = today + timedelta(days=5)
+        
+        print(f"\n  Downloading current prices from {actual_date} to {end_date.date()}...")
+        current_loader = DataLoader("tickers.txt", str(actual_date), str(end_date.date()), 1)  # min_history=1 for current data
+        current_close = current_loader.download_clean_data()
+        
+        if not current_close.empty and len(current_close) > 0:
+            latest_prices = current_close.iloc[-1]
+            latest_date = current_close.index[-1].date()
+            print(f"  ✓ Current prices loaded from {latest_date}")
+        else:
+            print(f"  ⚠ Current close data is empty, will use signal date prices")
+            latest_prices = None
+    except Exception as e:
+        print(f"  ⚠ Error downloading current prices: {str(e)}")
+        latest_prices = None
+    
+    # If we couldn't get current prices, use the most recent available data from the original close
+    if latest_prices is None:
+        print(f"  Using signal date prices ({close.index[-1].date()}) as fallback")
+        latest_prices = close.iloc[-1]
+    
+    print(f"  Latest prices has {len(latest_prices)} tickers")
+    print(f"  Positions to value: {positions_df['Ticker'].tolist()}")
+
+    # Calculate current portfolio value based on latest prices
+    current_value = cash_left  # Start with leftover cash
+    print(f"  Calculating current value: starting with cash_left={cash_left:.2f} SEK")
+
+    for _, row in positions_df.iterrows():
+        tkr = row["Ticker"]
+        shares = int(row["Shares"])
+        if tkr in latest_prices.index and shares > 0:
+            current_price = latest_prices[tkr]
+            if not (isinstance(current_price, float) and math.isnan(current_price)):
+                position_value = shares * current_price
+                current_value += position_value
+                print(f"    {tkr}: {shares} shares × {current_price:.2f} = {position_value:.2f} SEK")
+        else:
+            print(f"    {tkr}: not in latest_prices or 0 shares")
+
+    print(f"  Portfolio value at signal date: {portfolio_value_at_signal:.2f} SEK")
+    print(f"  Current portfolio value: {current_value:.2f} SEK")
+    gains_sek = current_value - portfolio_value_at_signal
+    print(f"  Gains/Losses: {gains_sek:+.2f} SEK")
 
     positions = []
     for _, row in positions_df.iterrows():
+        tkr = row["Ticker"]
+        m = metrics.get(tkr, {})
+        
+        # Get signal day price
+        signal_day_price = None
+        if signal_date_idx is not None:
+            signal_prices = close.iloc[signal_date_idx]
+            if tkr in signal_prices.index:
+                sp = signal_prices[tkr]
+                if not (isinstance(sp, float) and math.isnan(sp)):
+                    signal_day_price = _f(sp)
+        
+        # Get current day price
+        current_day_price = None
+        if tkr in latest_prices.index:
+            cp = latest_prices[tkr]
+            if not (isinstance(cp, float) and math.isnan(cp)):
+                current_day_price = _f(cp)
+        
         positions.append(
             {
-                "ticker": row["Ticker"],
-                "weight_pct": float(row["Weight (%)"]),
-                "target_sek": float(row["Target SEK"]),
-                "price_sek": float(row["Price (SEK)"]),
+                "ticker": tkr,
+                "weight_pct": _f(row["Weight (%)"]),
+                "target_sek": _f(row["Target SEK"]),
+                "price_sek": _f(row["Price (SEK)"]),
                 "shares": int(row["Shares"]),
-                "actual_sek": float(row["Actual SEK"]),
-                "delta_weight_pp": float(row["Δ Weight (%)"]),
+                "actual_sek": _f(row["Actual SEK"]),
+                "delta_weight_pp": _f(row["Delta Weight (%)"])
+                if "Delta Weight (%)" in row
+                else _f(row.get("Δ Weight (%)", None)),
+                "signal_day_price": signal_day_price,
+                "current_day_price": current_day_price,
+                "sharpe": m.get("sharpe"),
+                "ann_return": m.get("ann_return"),
+                "ann_vol": m.get("ann_vol"),
+                "max_dd": m.get("max_dd"),
+                "roc_short": m.get("roc_short"),
+                "roc_long": m.get("roc_long"),
+                "acceleration": m.get("acceleration"),
             }
         )
-
-    # Derive price_date — last trading day used for prices
-    from datetime import timedelta
-    from DataLoader import DataLoader
-    from config import cfg as _cfg
-
-    history_start = (signal_date - timedelta(days=2 * 365)).strftime("%Y-%m-%d")
-    history_end = signal_date.strftime("%Y-%m-%d")
-    loader = DataLoader("tickers.txt", history_start, history_end, _cfg.min_history)
-    close = loader.download_clean_data()
-    price_date = str(close.index[-1].date())
 
     return jsonify(
         {
             "positions": positions,
-            "signal_date": str(actual_date),
-            "price_date": price_date,
+            "signal_date": str(
+                actual_date
+            ),  # Rebalance date (typically first of month with "MS" frequency)
+            "price_date": str(actual_date),  # Prices from the rebalance date
             "cash_left": round(cash_left, 2),
             "portfolio_value": portfolio_value,
+            "current_value": round(current_value, 2),
+            "gains_sek": round(gains_sek, 2),
             "universe_size": close.shape[1],
         }
     )
