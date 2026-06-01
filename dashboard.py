@@ -10,14 +10,19 @@ Usage
   # open http://localhost:5000
 """
 
-from flask import Flask, render_template_string, request, jsonify
-from datetime import date, timedelta
-import traceback
+import logging
 import math
+import traceback
+from datetime import date, timedelta
 
-from generate_signals import generate_signals
-from DataLoader import DataLoader
+import pandas as pd
+from flask import Flask, jsonify, render_template_string, request
+
 from config import cfg
+from DataLoader import DataLoader
+from generate_signals import generate_signals
+
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -228,7 +233,7 @@ HTML = r"""<!DOCTYPE html>
     <span>Universe: <b id="m-uni">—</b> tickers</span>
     <span>Total invested: <b id="m-inv">—</b></span>
     <span>Current value: <b id="m-curr">—</b></span>
-    <span>Gains: <b id="m-gains">—</b></span>
+    <span>Gains vs invested: <b id="m-gains">—</b></span>
   </div>
 
   <div class="tbl-wrap" id="tbl-wrap">
@@ -333,12 +338,12 @@ function showCards(data){
   document.getElementById('m-sig').textContent=data.signal_date;
   document.getElementById('m-price').textContent=data.price_date;
   document.getElementById('m-uni').textContent=data.universe_size;
-  document.getElementById('m-inv').textContent=fmtSEK(invested);
-  
+  document.getElementById('m-inv').textContent=fmtSEK(invested + data.cash_left);
+
   const currEl=document.getElementById('m-curr');
   currEl.textContent=fmtSEK(data.current_value);
   currEl.className=data.gains_sek>=0?'pos':'neg';
-  
+
   const gainsEl=document.getElementById('m-gains');
   gainsEl.textContent=(data.gains_sek>=0?'+':'')+fmtSEK(data.gains_sek);
   gainsEl.className=data.gains_sek>=0?'pos':'neg';
@@ -359,12 +364,12 @@ function renderTable(){
   const maxW=Math.max(...sorted.map(r=>r.weight_pct));
   document.getElementById('tbody').innerHTML=sorted.map(r=>{
     const barW=Math.round((r.weight_pct/maxW)*56);
-    // Calculate price change
     const signalPrice=r.signal_day_price;
     const currentPrice=r.current_day_price;
     let priceChangePct=null;
-    if(signalPrice!=null && currentPrice!=null && signalPrice>0) priceChangePct=(currentPrice-signalPrice)/signalPrice*100;
-    
+    if(signalPrice!=null && currentPrice!=null && signalPrice>0)
+      priceChangePct=(currentPrice-signalPrice)/signalPrice*100;
+
     return `<tr>
       <td class="tkr">${r.ticker}</td>
       <td class="r"><div class="wbar-cell"><span>${r.weight_pct.toFixed(2)}</span><div class="wbar" style="width:${barW}px"></div></div></td>
@@ -429,6 +434,34 @@ document.addEventListener('keydown',e=>{ if(e.key==='Enter') runSignals(); });
 """
 
 
+def _safe_float(v):
+    """Return a rounded float or None for NaN / non-numeric values."""
+    try:
+        f = float(v)
+        return None if math.isnan(f) else round(f, 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def _asof_index(index, target_date):
+    """
+    Return the integer position of the last timestamp in *index* whose
+    .date() <= target_date, or None if no such timestamp exists.
+
+    Using asof() avoids iterating the entire index and correctly handles
+    weekends / holidays where target_date itself is not present.
+    """
+    ts = pd.Timestamp(target_date)
+    # Match the index's timezone (if any) to avoid tz-naive vs tz-aware errors
+    if index.tz is not None:
+        ts = ts.tz_localize(index.tz)
+    label = index.asof(ts)
+    if pd.isna(label):
+        return None
+    # get_loc returns a scalar for exact matches (which asof guarantees)
+    return index.get_loc(label)
+
+
 @app.route("/")
 def index():
     return render_template_string(HTML)
@@ -437,8 +470,6 @@ def index():
 @app.route("/api/config")
 def api_config():
     try:
-        from config import cfg
-
         return jsonify(
             {
                 "roc_short": getattr(cfg, "roc_short_lookback", "—"),
@@ -453,6 +484,7 @@ def api_config():
             }
         )
     except Exception as e:
+        log.exception("api_config failed")
         return jsonify({"error": str(e)}), 500
 
 
@@ -468,6 +500,7 @@ def api_signals():
     try:
         result = generate_signals(signal_date, portfolio_value)
     except Exception:
+        log.exception("generate_signals raised an exception")
         return jsonify({"error": traceback.format_exc()}), 500
 
     if not isinstance(result, tuple):
@@ -475,131 +508,131 @@ def api_signals():
 
     out_full, actual_date, cash_left, close, metrics = result
 
+    # ------------------------------------------------------------------ #
+    # Filter out separator / summary rows                                  #
+    # ------------------------------------------------------------------ #
     positions_df = out_full[
-        ~out_full["Ticker"].str.startswith("--")
+        ~out_full["Ticker"].str.startswith(("--", "\u2500"))
         & (out_full["Ticker"] != "Cash (leftover)")
     ].copy()
-    # Also filter the unicode dash variant
-    positions_df = positions_df[~positions_df["Ticker"].str.startswith("\u2500")].copy()
 
-    def _f(v):
-        try:
-            f = float(v)
-            return None if math.isnan(f) else round(f, 6)
-        except (TypeError, ValueError):
-            return None
+    # ------------------------------------------------------------------ #
+    # Signal-date prices                                                   #
+    # Use asof() so weekends / holidays fall back to the nearest prior     #
+    # trading day rather than silently missing the date.                   #
+    # ------------------------------------------------------------------ #
+    signal_date_idx = _asof_index(close.index, actual_date)
 
-    # Calculate portfolio value at signal date and current date
-    # Try to find the signal date in the close index
-    signal_date_idx = None
-    for idx, ts in enumerate(close.index):
-        if ts.date() == actual_date:
-            signal_date_idx = idx
-            break
-
-    # Calculate portfolio value at signal date
-    portfolio_value_at_signal = cash_left  # Start with leftover cash
-    print(f"  Signal date index: {signal_date_idx}")
     if signal_date_idx is not None:
         signal_prices = close.iloc[signal_date_idx]
-        print(f"  Using signal prices from index {signal_date_idx}")
-        for _, row in positions_df.iterrows():
-            tkr = row["Ticker"]
-            shares = int(row["Shares"])
-            if tkr in signal_prices.index and shares > 0:
-                signal_price = signal_prices[tkr]
-                if not (isinstance(signal_price, float) and math.isnan(signal_price)):
-                    portfolio_value_at_signal += shares * signal_price
+        # Invested capital = sum of (shares × price-paid) for each position
+        invested_capital = cash_left + sum(
+            int(row["Shares"]) * signal_prices[row["Ticker"]]
+            for _, row in positions_df.iterrows()
+            if row["Ticker"] in signal_prices.index
+            and int(row["Shares"]) > 0
+            and not (
+                isinstance(signal_prices[row["Ticker"]], float)
+                and math.isnan(signal_prices[row["Ticker"]])
+            )
+        )
     else:
-        # If signal date not found, use actual_sek from positions
-        print(f"  Signal date not found in close index, using actual_sek fallback")
-        portfolio_value_at_signal = cash_left + positions_df["Actual SEK"].sum()
-        print(f"  Actual SEK sum: {positions_df['Actual SEK'].sum():.2f}")
+        log.warning(
+            "actual_date %s not found in close index; falling back to Actual SEK.",
+            actual_date,
+        )
+        signal_prices = None
+        # Fallback: use the pre-computed Actual SEK column (already at signal prices)
+        invested_capital = cash_left + float(positions_df["Actual SEK"].sum())
 
-    # Fetch current prices (from signal date to today)
-    # Download additional data to get current prices beyond the signal date
+    # ------------------------------------------------------------------ #
+    # Current prices                                                       #
+    # Download data from actual_date forward so we get the latest quote.  #
+    # Keep min_history consistent with the original DataLoader call so    #
+    # we don't introduce tickers absent from the signal universe.          #
+    # ------------------------------------------------------------------ #
+    original_min_history = getattr(cfg, "min_history", 252)
+    today = date.today()
+    end_date = today + timedelta(days=5)  # buffer for non-trading days
+
     latest_prices = None
+    latest_date = None
     try:
-        today = date.today()
-        # Add a few days buffer to ensure we get the most recent trading day
-        end_date = today + timedelta(days=5)
-        
-        print(f"\n  Downloading current prices from {actual_date} to {end_date.date()}...")
-        current_loader = DataLoader("tickers.txt", str(actual_date), str(end_date.date()), 1)  # min_history=1 for current data
+        current_loader = DataLoader(
+            "tickers.txt",
+            str(actual_date),
+            str(end_date),  # date, not datetime — no .date() needed
+            original_min_history,
+        )
         current_close = current_loader.download_clean_data()
-        
-        if not current_close.empty and len(current_close) > 0:
+
+        if not current_close.empty:
             latest_prices = current_close.iloc[-1]
             latest_date = current_close.index[-1].date()
-            print(f"  ✓ Current prices loaded from {latest_date}")
+            log.info("Current prices loaded from %s", latest_date)
         else:
-            print(f"  ⚠ Current close data is empty, will use signal date prices")
-            latest_prices = None
-    except Exception as e:
-        print(f"  ⚠ Error downloading current prices: {str(e)}")
-        latest_prices = None
-    
-    # If we couldn't get current prices, use the most recent available data from the original close
+            log.warning("current_close is empty; will fall back to signal-date prices.")
+    except Exception:
+        log.exception("Error downloading current prices; falling back.")
+
+    # If the download failed or returned nothing, use the last row of the
+    # original close DataFrame as a graceful fallback.
     if latest_prices is None:
-        print(f"  Using signal date prices ({close.index[-1].date()}) as fallback")
         latest_prices = close.iloc[-1]
-    
-    print(f"  Latest prices has {len(latest_prices)} tickers")
-    print(f"  Positions to value: {positions_df['Ticker'].tolist()}")
+        latest_date = close.index[-1].date()
+        log.info("Using fallback prices from %s", latest_date)
 
-    # Calculate current portfolio value based on latest prices
-    current_value = cash_left  # Start with leftover cash
-    print(f"  Calculating current value: starting with cash_left={cash_left:.2f} SEK")
-
+    # ------------------------------------------------------------------ #
+    # Current portfolio value                                              #
+    # ------------------------------------------------------------------ #
+    current_value = cash_left
     for _, row in positions_df.iterrows():
         tkr = row["Ticker"]
         shares = int(row["Shares"])
         if tkr in latest_prices.index and shares > 0:
-            current_price = latest_prices[tkr]
-            if not (isinstance(current_price, float) and math.isnan(current_price)):
-                position_value = shares * current_price
-                current_value += position_value
-                print(f"    {tkr}: {shares} shares × {current_price:.2f} = {position_value:.2f} SEK")
-        else:
-            print(f"    {tkr}: not in latest_prices or 0 shares")
+            cp = latest_prices[tkr]
+            if not (isinstance(cp, float) and math.isnan(cp)):
+                current_value += shares * cp
 
-    print(f"  Portfolio value at signal date: {portfolio_value_at_signal:.2f} SEK")
-    print(f"  Current portfolio value: {current_value:.2f} SEK")
-    gains_sek = current_value - portfolio_value_at_signal
-    print(f"  Gains/Losses: {gains_sek:+.2f} SEK")
+    # Gains are relative to what was actually invested at signal prices,
+    # keeping the metric internally consistent regardless of rounding.
+    gains_sek = current_value - invested_capital
 
+    # ------------------------------------------------------------------ #
+    # Build positions list                                                 #
+    # ------------------------------------------------------------------ #
     positions = []
     for _, row in positions_df.iterrows():
         tkr = row["Ticker"]
         m = metrics.get(tkr, {})
-        
-        # Get signal day price
+
         signal_day_price = None
-        if signal_date_idx is not None:
-            signal_prices = close.iloc[signal_date_idx]
-            if tkr in signal_prices.index:
-                sp = signal_prices[tkr]
-                if not (isinstance(sp, float) and math.isnan(sp)):
-                    signal_day_price = _f(sp)
-        
-        # Get current day price
+        if signal_prices is not None and tkr in signal_prices.index:
+            sp = signal_prices[tkr]
+            if not (isinstance(sp, float) and math.isnan(sp)):
+                signal_day_price = _safe_float(sp)
+
         current_day_price = None
         if tkr in latest_prices.index:
             cp = latest_prices[tkr]
             if not (isinstance(cp, float) and math.isnan(cp)):
-                current_day_price = _f(cp)
-        
+                current_day_price = _safe_float(cp)
+
+        delta_weight = _safe_float(
+            row.get("Delta Weight (%)")
+            if "Delta Weight (%)" in row
+            else row.get("\u0394 Weight (%)")
+        )
+
         positions.append(
             {
                 "ticker": tkr,
-                "weight_pct": _f(row["Weight (%)"]),
-                "target_sek": _f(row["Target SEK"]),
-                "price_sek": _f(row["Price (SEK)"]),
+                "weight_pct": _safe_float(row["Weight (%)"]),
+                "target_sek": _safe_float(row["Target SEK"]),
+                "price_sek": _safe_float(row["Price (SEK)"]),
                 "shares": int(row["Shares"]),
-                "actual_sek": _f(row["Actual SEK"]),
-                "delta_weight_pp": _f(row["Delta Weight (%)"])
-                if "Delta Weight (%)" in row
-                else _f(row.get("Δ Weight (%)", None)),
+                "actual_sek": _safe_float(row["Actual SEK"]),
+                "delta_weight_pp": delta_weight,
                 "signal_day_price": signal_day_price,
                 "current_day_price": current_day_price,
                 "sharpe": m.get("sharpe"),
@@ -615,10 +648,8 @@ def api_signals():
     return jsonify(
         {
             "positions": positions,
-            "signal_date": str(
-                actual_date
-            ),  # Rebalance date (typically first of month with "MS" frequency)
-            "price_date": str(actual_date),  # Prices from the rebalance date
+            "signal_date": str(actual_date),
+            "price_date": str(latest_date),
             "cash_left": round(cash_left, 2),
             "portfolio_value": portfolio_value,
             "current_value": round(current_value, 2),
@@ -629,6 +660,9 @@ def api_signals():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s"
+    )
     print("\n  Signal Generator Dashboard")
     print("  http://localhost:5000\n")
     app.run(debug=True, port=5000)
