@@ -98,7 +98,7 @@ def _sharpe_weights(return_matrix: pd.DataFrame) -> pd.Series:
         neg_sharpe,
         x0=np.ones(n) / n,
         method="SLSQP",
-        bounds=[(0, 1)] * n,
+        bounds=[(0, cfg.max_position_weight)] * n,
         constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1}],
         options={"maxiter": 500, "ftol": 1e-9},
     )
@@ -107,8 +107,8 @@ def _sharpe_weights(return_matrix: pd.DataFrame) -> pd.Series:
 
     # Hard-cap: keep only top_n positions by weight, renormalise
     if n > cfg.top_n:
-        threshold = w.nlargest(cfg.top_n).iloc[-1]
-        w[w < threshold] = 0.0
+        top_tickers = w.nlargest(cfg.top_n).index
+        w[~w.index.isin(top_tickers)] = 0.0
         if w.sum() > 0:
             w /= w.sum()
 

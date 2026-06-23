@@ -193,8 +193,7 @@ def generate_signals(signal_date: date, portfolio_value: float) -> pd.DataFrame:
             break
 
     if w_row.empty:
-        print("  ⚠  Strategy returned no positions in the entire history window.")
-        return pd.DataFrame()
+        raise ValueError("Strategy returned no positions in the entire history window.")
 
     if signal_ts != last_date:
         print(
@@ -355,12 +354,10 @@ def main():
     print(f"  Portfolio: {portfolio_value:,.0f} SEK")
     print(f"{'═' * 55}")
 
-    result = generate_signals(signal_date, portfolio_value)
-
-    if isinstance(result, tuple):
-        out_full, actual_date, cash_left, _close, _metrics = result
-    else:
-        print("No signals generated.")
+    try:
+        out_full, actual_date, cash_left, _, _ = generate_signals(signal_date, portfolio_value)
+    except ValueError as e:
+        print(f"  No signals generated: {e}")
         return
 
     # ── Save CSV ──────────────────────────────────────────────────────────────

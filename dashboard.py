@@ -498,19 +498,14 @@ def api_signals():
         return jsonify({"error": f"Bad input: {e}"}), 400
 
     try:
-        result = generate_signals(signal_date, portfolio_value)
+        out_full, actual_date, cash_left, close, metrics = generate_signals(signal_date, portfolio_value)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 200
     except Exception:
         log.exception("generate_signals raised an exception")
         return jsonify({"error": traceback.format_exc()}), 500
 
-    if not isinstance(result, tuple):
-        return jsonify({"error": "Strategy returned no positions for this date."}), 200
-
-    out_full, actual_date, cash_left, close, metrics = result
-
-    # ------------------------------------------------------------------ #
-    # Filter out separator / summary rows                                  #
-    # ------------------------------------------------------------------ #
+    # Strip summary rows — keep only real positions
     positions_df = out_full[
         ~out_full["Ticker"].str.startswith(("--", "\u2500"))
         & (out_full["Ticker"] != "Cash (leftover)")
@@ -644,6 +639,7 @@ def api_signals():
                 "acceleration": m.get("acceleration"),
             }
         )
+
 
     return jsonify(
         {

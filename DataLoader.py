@@ -41,7 +41,7 @@ class DataLoader:
         valid_cols = close_df.count() >= self.min_history
         close_df = close_df.loc[:, valid_cols]
         print(f"Remaining tickers after MIN_HISTORY filter: {close_df.shape[1]}")
-        print(f"Final dataset shape: {close.shape}")
+        print(f"Final dataset shape: {close_df.shape}")
         return close_df
 
     def download_benchmark(self, index, ticker="^OMX"):
