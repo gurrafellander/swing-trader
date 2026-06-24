@@ -31,9 +31,9 @@ def _rebalance_mask(index: pd.DatetimeIndex) -> pd.Series:
     """
     freq = "W-FRI" if cfg.rebalance_freq == "W" else cfg.rebalance_freq
     dates_only = index.normalize()
-    rebalance_dates = (
-        pd.Series(1, index=dates_only).resample(freq).first().index.normalize()
-    )
+    # resample().first() returns the first *actual trading day* in each period as a value;
+    # using that instead of the calendar anchor labels (which may not be trading days).
+    rebalance_dates = pd.Series(dates_only, index=dates_only).resample(freq).first()
     return pd.Series(dates_only.isin(rebalance_dates), index=index)
 
 
@@ -111,6 +111,11 @@ def _sharpe_weights(return_matrix: pd.DataFrame) -> pd.Series:
         w[~w.index.isin(top_tickers)] = 0.0
         if w.sum() > 0:
             w /= w.sum()
+
+    # Zero out SLSQP numerical residuals (sub-0.1% weights are not meaningful)
+    w[w < 1e-3] = 0.0
+    if w.sum() > 0:
+        w /= w.sum()
 
     return w
 

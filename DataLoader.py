@@ -37,6 +37,19 @@ class DataLoader:
 
         close_df = pd.concat(close_dict.values(), axis=1)
         close_df.columns = list(close_dict.keys())
+
+        # Yahoo Finance returns per-market UTC timestamps (Swedish stocks at 22:00 UTC,
+        # UK stocks at 23:00 UTC, US stocks at 04:00 UTC next day), so a single trading
+        # day produces ~3 rows in the merged index.  Convert everything to Stockholm
+        # calendar dates so each trading day collapses to exactly one row.
+        if close_df.index.tz is not None:
+            close_df.index = (
+                close_df.index.tz_convert("Europe/Stockholm").normalize().tz_localize(None)
+            )
+        else:
+            close_df.index = close_df.index.normalize()
+        close_df = close_df.groupby(close_df.index).last()
+
         close_df = close_df.sort_index().ffill().dropna(how="all")
         valid_cols = close_df.count() >= self.min_history
         close_df = close_df.loc[:, valid_cols]

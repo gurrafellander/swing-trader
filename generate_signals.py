@@ -61,7 +61,8 @@ def get_raw_weights(signal_date: date) -> tuple[pd.Series, pd.Timestamp, pd.Time
       signal_ts  — the rebalance date the weights came from
       last_date  — the last available trading day (price reference)
     """
-    history_start = (signal_date - timedelta(days=2 * 365)).strftime("%Y-%m-%d")
+    month_start = signal_date.replace(day=1)
+    history_start = (month_start - timedelta(days=2 * 365)).strftime("%Y-%m-%d")
     history_end = signal_date.strftime("%Y-%m-%d")
     loader = DataLoader("tickers.txt", history_start, history_end, cfg.min_history)
     close = loader.download_clean_data()
@@ -152,9 +153,11 @@ def generate_signals(signal_date: date, portfolio_value: float) -> pd.DataFrame:
     with whole-share allocations for the given portfolio_value.
     """
 
-    # We need enough history before signal_date for the strategy's lookback windows.
-    # 2 years of buffer is generous for any momentum/Sharpe lookback.
-    history_start = (signal_date - timedelta(days=2 * 365)).strftime("%Y-%m-%d")
+    # Download 2 years of history up to signal_date — enough for all lookback windows.
+    # history_start is anchored to the first of the month so every date in the same
+    # month uses the same start point.
+    month_start = signal_date.replace(day=1)
+    history_start = (month_start - timedelta(days=2 * 365)).strftime("%Y-%m-%d")
     history_end = signal_date.strftime("%Y-%m-%d")
 
     print(f"\nDownloading data  {history_start}  →  {history_end} …")
@@ -201,11 +204,10 @@ def generate_signals(signal_date: date, portfolio_value: float) -> pd.DataFrame:
             f"using most recent rebalance signals from {signal_ts.date()}"
         )
 
-    # Prices on the *last available* trading day (current prices, not rebalance-day prices)
-    print(
-        f"  Signals from rebalance: {signal_ts.date()}  |  Prices from: {last_date.date()}"
-    )
-    prices: pd.Series = close.loc[last_date, w_row.index]
+    # Prices on the rebalance day — shares are sized at the signal-date price.
+    # The dashboard compares these against close.iloc[-1] (today) to show gains.
+    print(f"  Signals from rebalance: {signal_ts.date()}  |  Current data through: {last_date.date()}")
+    prices: pd.Series = close.loc[signal_ts, w_row.index]
 
     # ── Allocation ──────────────────────────────────────────────────────────
     target_sek = w_row * portfolio_value  # ideal SEK per ticker

@@ -13,13 +13,12 @@ Usage
 import logging
 import math
 import traceback
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 from flask import Flask, jsonify, render_template_string, request
 
 from config import cfg
-from DataLoader import DataLoader
 from generate_signals import generate_signals
 
 log = logging.getLogger(__name__)
@@ -443,25 +442,6 @@ def _safe_float(v):
         return None
 
 
-def _asof_index(index, target_date):
-    """
-    Return the integer position of the last timestamp in *index* whose
-    .date() <= target_date, or None if no such timestamp exists.
-
-    Using asof() avoids iterating the entire index and correctly handles
-    weekends / holidays where target_date itself is not present.
-    """
-    ts = pd.Timestamp(target_date)
-    # Match the index's timezone (if any) to avoid tz-naive vs tz-aware errors
-    if index.tz is not None:
-        ts = ts.tz_localize(index.tz)
-    label = index.asof(ts)
-    if pd.isna(label):
-        return None
-    # get_loc returns a scalar for exact matches (which asof guarantees)
-    return index.get_loc(label)
-
-
 @app.route("/")
 def index():
     return render_template_string(HTML)
@@ -507,116 +487,46 @@ def api_signals():
 
     # Strip summary rows — keep only real positions
     positions_df = out_full[
-        ~out_full["Ticker"].str.startswith(("--", "\u2500"))
+        ~out_full["Ticker"].str.startswith(("--", "─"))
         & (out_full["Ticker"] != "Cash (leftover)")
     ].copy()
 
-    # ------------------------------------------------------------------ #
-    # Signal-date prices                                                   #
-    # Use asof() so weekends / holidays fall back to the nearest prior     #
-    # trading day rather than silently missing the date.                   #
-    # ------------------------------------------------------------------ #
-    signal_date_idx = _asof_index(close.index, actual_date)
+    # ------------------------------------------------------------------
+    # Prices
+    # generate_signals already sizes shares at the rebalance-date price,
+    # which is stored in "Price (SEK)" and "Actual SEK".
+    # The last row of close is the most recent price in the single download
+    # (i.e. today's closing price when you run the dashboard today).
+    # ------------------------------------------------------------------
+    invested_capital = cash_left + float(positions_df["Actual SEK"].sum())
 
-    if signal_date_idx is not None:
-        signal_prices = close.iloc[signal_date_idx]
-        # Invested capital = sum of (shares × price-paid) for each position
-        invested_capital = cash_left + sum(
-            int(row["Shares"]) * signal_prices[row["Ticker"]]
-            for _, row in positions_df.iterrows()
-            if row["Ticker"] in signal_prices.index
-            and int(row["Shares"]) > 0
-            and not (
-                isinstance(signal_prices[row["Ticker"]], float)
-                and math.isnan(signal_prices[row["Ticker"]])
-            )
-        )
-    else:
-        log.warning(
-            "actual_date %s not found in close index; falling back to Actual SEK.",
-            actual_date,
-        )
-        signal_prices = None
-        # Fallback: use the pre-computed Actual SEK column (already at signal prices)
-        invested_capital = cash_left + float(positions_df["Actual SEK"].sum())
+    latest_prices = close.iloc[-1]
+    latest_date = close.index[-1].date()
 
-    # ------------------------------------------------------------------ #
-    # Current prices                                                       #
-    # Download data from actual_date forward so we get the latest quote.  #
-    # Keep min_history consistent with the original DataLoader call so    #
-    # we don't introduce tickers absent from the signal universe.          #
-    # ------------------------------------------------------------------ #
-    original_min_history = getattr(cfg, "min_history", 252)
-    today = date.today()
-    end_date = today + timedelta(days=5)  # buffer for non-trading days
-
-    latest_prices = None
-    latest_date = None
-    try:
-        current_loader = DataLoader(
-            "tickers.txt",
-            str(actual_date),
-            str(end_date),  # date, not datetime — no .date() needed
-            original_min_history,
-        )
-        current_close = current_loader.download_clean_data()
-
-        if not current_close.empty:
-            latest_prices = current_close.iloc[-1]
-            latest_date = current_close.index[-1].date()
-            log.info("Current prices loaded from %s", latest_date)
-        else:
-            log.warning("current_close is empty; will fall back to signal-date prices.")
-    except Exception:
-        log.exception("Error downloading current prices; falling back.")
-
-    # If the download failed or returned nothing, use the last row of the
-    # original close DataFrame as a graceful fallback.
-    if latest_prices is None:
-        latest_prices = close.iloc[-1]
-        latest_date = close.index[-1].date()
-        log.info("Using fallback prices from %s", latest_date)
-
-    # ------------------------------------------------------------------ #
-    # Current portfolio value                                              #
-    # ------------------------------------------------------------------ #
-    current_value = cash_left
-    for _, row in positions_df.iterrows():
-        tkr = row["Ticker"]
-        shares = int(row["Shares"])
-        if tkr in latest_prices.index and shares > 0:
-            cp = latest_prices[tkr]
-            if not (isinstance(cp, float) and math.isnan(cp)):
-                current_value += shares * cp
-
-    # Gains are relative to what was actually invested at signal prices,
-    # keeping the metric internally consistent regardless of rounding.
+    # Current value: cash + mark-to-market at latest prices
+    current_value = cash_left + sum(
+        int(row["Shares"]) * float(latest_prices[tkr])
+        for _, row in positions_df.iterrows()
+        if (tkr := row["Ticker"]) in latest_prices.index
+        and int(row["Shares"]) > 0
+        and not math.isnan(float(latest_prices[tkr]))
+    )
     gains_sek = current_value - invested_capital
 
-    # ------------------------------------------------------------------ #
-    # Build positions list                                                 #
-    # ------------------------------------------------------------------ #
+    # Build positions list
     positions = []
     for _, row in positions_df.iterrows():
         tkr = row["Ticker"]
         m = metrics.get(tkr, {})
 
-        signal_day_price = None
-        if signal_prices is not None and tkr in signal_prices.index:
-            sp = signal_prices[tkr]
-            if not (isinstance(sp, float) and math.isnan(sp)):
-                signal_day_price = _safe_float(sp)
-
         current_day_price = None
         if tkr in latest_prices.index:
-            cp = latest_prices[tkr]
-            if not (isinstance(cp, float) and math.isnan(cp)):
-                current_day_price = _safe_float(cp)
+            current_day_price = _safe_float(latest_prices[tkr])
 
         delta_weight = _safe_float(
             row.get("Delta Weight (%)")
             if "Delta Weight (%)" in row
-            else row.get("\u0394 Weight (%)")
+            else row.get("Δ Weight (%)")
         )
 
         positions.append(
@@ -628,7 +538,7 @@ def api_signals():
                 "shares": int(row["Shares"]),
                 "actual_sek": _safe_float(row["Actual SEK"]),
                 "delta_weight_pp": delta_weight,
-                "signal_day_price": signal_day_price,
+                "signal_day_price": _safe_float(row["Price (SEK)"]),
                 "current_day_price": current_day_price,
                 "sharpe": m.get("sharpe"),
                 "ann_return": m.get("ann_return"),
@@ -639,7 +549,6 @@ def api_signals():
                 "acceleration": m.get("acceleration"),
             }
         )
-
 
     return jsonify(
         {
