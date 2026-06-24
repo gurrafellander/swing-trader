@@ -196,6 +196,9 @@ def _price_indicator_chart(
                 annotation_font_size=10,
             )
 
+    # When RSI is present, ROC goes on the right (secondary) y-axis so both fit
+    # on the same panel with independent scales. Without RSI, ROC takes the
+    # primary (left) axis — no dual-axis needed.
     fig.add_trace(
         go.Scatter(
             x=roc_series.index,
@@ -205,7 +208,7 @@ def _price_indicator_chart(
         ),
         row=2,
         col=1,
-        secondary_y=True,
+        secondary_y=show_rsi,
     )
 
     # ── Layout ────────────────────────────────────────────────────────────────
@@ -225,14 +228,17 @@ def _price_indicator_chart(
     if show_rsi:
         fig.update_yaxes(
             title_text="RSI",
-            row=2,
-            col=1,
-            secondary_y=False,
-            range=[0, 100],
-            showgrid=True,
-            gridcolor="#f0f0f0",
+            row=2, col=1, secondary_y=False,
+            range=[0, 100], showgrid=True, gridcolor="#f0f0f0",
         )
-    fig.update_yaxes(title_text="ROC %", row=2, col=1, secondary_y=True, showgrid=False)
+        fig.update_yaxes(
+            title_text="ROC %", row=2, col=1, secondary_y=True, showgrid=False,
+        )
+    else:
+        fig.update_yaxes(
+            title_text="ROC %", row=2, col=1, secondary_y=False,
+            showgrid=True, gridcolor="#f0f0f0",
+        )
 
     return fig
 
@@ -445,10 +451,9 @@ elif view == "Portfolio":
                 portfolio_value = rebased.mean(axis=1)
                 portfolio_value.name = "Portfolio"
 
-                # ROC on the portfolio value series (same definition)
-                import pandas_ta as ta_local
-
-                port_roc = ta_local.roc(portfolio_value, length=ROC_LOOKBACK)
+                # ROC on the portfolio value series (same definition as single-stock)
+                import pandas_ta as _ta
+                port_roc = _ta.roc(portfolio_value, length=ROC_LOOKBACK)
 
                 fig = _price_indicator_chart(
                     price_series=portfolio_value,
