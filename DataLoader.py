@@ -115,7 +115,15 @@ class DataLoader:
                 if not early.empty:
                     cached = pd.concat([early, cached])
                     cached = cached[~cached.index.duplicated(keep="last")].sort_index()
-                    changed = True
+                else:
+                    # Gap contained no trading days (e.g. start_date is a holiday).
+                    # Insert an all-NaN stub so cache_first == request_start on
+                    # future runs and we don't retry this download every session.
+                    stub = pd.DataFrame(
+                        index=[pd.Timestamp(self.start_date)], columns=cached.columns
+                    )
+                    cached = pd.concat([stub, cached]).sort_index()
+                changed = True
 
             # ── 2. Add tickers that are new in tickers.txt ───────────────────
             missing = [t for t in self.tickers if t not in cached.columns]

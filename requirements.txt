@@ -6,3 +6,5 @@ yfinance
 pandas-ta
 flask
 pyarrow
+streamlit
+plotly
