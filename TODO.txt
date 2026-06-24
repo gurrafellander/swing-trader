@@ -1,3 +1,23 @@
-add script for getting the new portfolio for strategy usage. Must be input of total equity to use and then it gives out, # of XXX, ## of YYY, etc. 
-add nice front and
-implement caching of universe to get quicker response
+## Portfolio view
+1. Add "remove all" button for stocks in portfolio
+2. Save/load portfolio to disk so it persists across sessions
+3. Overlay OMXS30 benchmark on portfolio price chart for comparison
+4. Add portfolio metrics: Sharpe ratio, max drawdown, CAGR
+5. Custom (non-equal) portfolio weighting
+
+## Screener
+6. Historical screener queries (e.g. "show RSI < 30 on every day in the past year") — currently snapshot-only
+7. Filter persistence: remember last-used filter values across page loads
+
+## Single stock view
+8. Candlestick chart option (currently line only)
+
+## Universe / data
+9. Search for tickers outside the existing universe (arbitrary Yahoo Finance lookup)
+10. Replace vectorbt (vbt.YFData) in DataLoader with plain yfinance — vectorbt is the
+    only remaining dependency on vbt now that backtesting is removed
+
+## Housekeeping
+11. Remove or archive old files no longer used on this branch:
+    dashboard.py, backtest.py, strategies.py, generate_signals.py,
+    test_signals_vs_backtest.py, tests/
