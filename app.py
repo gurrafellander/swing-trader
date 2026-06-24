@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 
 from config import cfg
 from DataLoader import DataLoader
-from indicators import Indicators, ROC_LOOKBACK
+from indicators import Indicators, ROC_LOOKBACK, ROC_ACCEL_DAYS
 
 st.set_page_config(page_title="Stock Screener", layout="wide")
 
@@ -327,6 +327,7 @@ elif view == "Screener":
         with f5:
             above_ma50 = st.checkbox("Above MA50 only")
             above_ma200 = st.checkbox("Above MA200 only")
+            roc_accel = st.checkbox(f"ROC accelerating ({ROC_ACCEL_DAYS}d)")
 
     mask = (
         snap["RSI(14)"].between(*rsi_range)
@@ -338,6 +339,8 @@ elif view == "Screener":
         mask &= snap["vs MA50 %"] > 0
     if above_ma200:
         mask &= snap["vs MA200 %"] > 0
+    if roc_accel:
+        mask &= snap[f"ROC accel ({ROC_ACCEL_DAYS}d)"]
 
     filtered = snap[mask].copy()
     st.caption(f"{len(filtered)} / {len(snap)} tickers shown")
@@ -380,6 +383,9 @@ elif view == "Screener":
                     ),
                     "BB Width %": st.column_config.NumberColumn(
                         "BB Width %", format="%.1f%%"
+                    ),
+                    f"ROC accel ({ROC_ACCEL_DAYS}d)": st.column_config.CheckboxColumn(
+                        f"ROC↑{ROC_ACCEL_DAYS}d"
                     ),
                 },
             )

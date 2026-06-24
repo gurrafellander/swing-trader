@@ -9,6 +9,9 @@ import pandas_ta as ta
 # Single ROC lookback used everywhere — change here to tune globally.
 ROC_LOOKBACK = 21
 
+# Number of consecutive daily increases required for the "ROC accelerating" filter.
+ROC_ACCEL_DAYS = 4
+
 
 def compute_ma(close: pd.DataFrame, window: int) -> pd.DataFrame:
     return close.rolling(window).mean()
@@ -31,6 +34,12 @@ def compute_rsi(close: pd.DataFrame, window: int = 14) -> pd.DataFrame:
     return result
 
 
+def compute_roc_accelerating(roc: pd.DataFrame, days: int = ROC_ACCEL_DAYS) -> pd.DataFrame:
+    """Boolean DataFrame: True where ROC has been strictly increasing for `days` consecutive bars."""
+    daily_up = roc.diff() > 0
+    return daily_up.rolling(days).sum() == days
+
+
 def compute_roc(close: pd.DataFrame, length: int = ROC_LOOKBACK) -> pd.DataFrame:
     """Rate of Change (%) via pandas_ta — same definition everywhere."""
     result = pd.DataFrame(index=close.index, columns=close.columns, dtype=float)
@@ -51,6 +60,7 @@ class Indicators:
         self.bb_upper, self.bb_mid, self.bb_lower = compute_bollinger(close)
         self.rsi = compute_rsi(close)
         self.roc = compute_roc(close)
+        self.roc_accelerating = compute_roc_accelerating(self.roc)
 
     def latest_snapshot(self) -> pd.DataFrame:
         """One-row-per-ticker snapshot of the most recent indicator values."""
@@ -67,12 +77,14 @@ class Indicators:
         bb_mid_s = _last(self.bb_mid)
         rsi_s = _last(self.rsi)
         roc_s = _last(self.roc)
+        roc_accel_s = _last(self.roc_accelerating)
 
         snap = pd.DataFrame(
             {
                 "Last Close": close_s,
                 "RSI(14)": rsi_s,
                 f"ROC({ROC_LOOKBACK}d) %": roc_s,
+                f"ROC accel ({ROC_ACCEL_DAYS}d)": roc_accel_s.astype(bool),
                 "vs MA50 %": (close_s / ma50_s - 1) * 100,
                 "vs MA200 %": (close_s / ma200_s - 1) * 100,
                 "vs BB Upper %": (close_s / bb_upper_s - 1) * 100,
