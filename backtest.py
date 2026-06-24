@@ -18,6 +18,7 @@ from strategies import (
     momentum_with_regime,
     rising_momentum_sharpe,
     rsi_mean_reversion,
+    trend_filtered_dip_buy,
 )
 
 # ── Colour palette (one per curve) ───────────────────────────────────────────
@@ -30,6 +31,7 @@ COLOURS = {
     "Bollinger Mean Reversion": "#F15BB5",
     "Buy & Hold (Universe)": "#aaaaaa",
     "OMXS30 Buy & Hold": "#666666",
+    "Trend filtered dip buy": "#FFC857",
 }
 
 
@@ -94,6 +96,7 @@ def run_backtest():
         ("Rising Momentum + Sharpe", lambda: rising_momentum_sharpe(close)),
         ("MA Crossover", lambda: ma_crossover(close)),
         ("Bollinger Mean Reversion", lambda: bollinger_mean_reversion(close)),
+        ("Trend filtered dip buy", lambda: trend_filtered_dip_buy(close)),
     ]
 
     # ── Run all strategies ────────────────────────────────────────────────────

@@ -58,7 +58,17 @@ class DataLoader:
 
     def load_universe(self):
         with open(self.ticker_path) as f:
-            return [line.strip() for line in f if line.strip()]
+            tickers = [line.strip() for line in f if line.strip()]
+        seen, unique = set(), []
+        for t in tickers:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+            else:
+                print(
+                    f"  Warning: duplicate ticker '{t}' in {self.ticker_path} — ignored"
+                )
+        return unique
 
     # ── cache helpers ──────────────────────────────────────────────────────────
 
@@ -80,19 +90,22 @@ class DataLoader:
         today = date.today()
         today_str = str(today)
         request_start = date.fromisoformat(self.start_date)
+        print(request_start)
 
         cached = self._load_cache()
 
         if cached is None:
             # ── First run: download everything and cache it ──────────────────
-            print(f"No price cache — downloading full history ({self.start_date} → {today_str})…")
+            print(
+                f"No price cache — downloading full history ({self.start_date} → {today_str})…"
+            )
             cached = _download_raw(self.tickers, self.start_date, today_str)
             if not cached.empty:
                 self._save_cache(cached)
 
         else:
             cache_first = cached.index[0].date()
-            cache_last  = cached.index[-1].date()
+            cache_last = cached.index[-1].date()
             changed = False
 
             # ── 1. Extend backward if caller needs older data ────────────────
@@ -130,7 +143,7 @@ class DataLoader:
         # ── Slice to requested window, apply min_history filter ───────────────
         end_dt = pd.Timestamp(self.end_date) if self.end_date else pd.Timestamp(today)
         available = [t for t in self.tickers if t in cached.columns]
-        close_df = cached.loc[pd.Timestamp(self.start_date):end_dt, available]
+        close_df = cached.loc[pd.Timestamp(self.start_date) : end_dt, available]
 
         close_df = close_df.sort_index().ffill().dropna(how="all")
         valid_cols = close_df.count() >= self.min_history
@@ -149,9 +162,10 @@ class DataLoader:
                 ticker, start=self.start_date, end=self.end_date, interval="1d"
             )
             bench = data.get("Close")
-            bench = bench.reindex(index).ffill()
             if isinstance(bench, pd.DataFrame):
                 bench = bench.iloc[:, 0]
+            bench = _normalize(bench.to_frame()).iloc[:, 0]
+            bench = bench.reindex(index).ffill()
             return bench
         except Exception as e:
             print(f"Could not download benchmark: {e}")

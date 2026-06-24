@@ -139,7 +139,6 @@ def apply_stop_loss(
     """
     out = weights.copy()
     entry_price = np.full(len(close.columns), np.nan)
-    col_idx = {ticker: i for i, ticker in enumerate(close.columns)}
     close_arr = close.to_numpy()
     out_arr = out.to_numpy(
         dtype=np.float32, copy=True
@@ -331,8 +330,8 @@ def rising_momentum_sharpe(close: pd.DataFrame) -> pd.DataFrame:
     Selection logic
     ---------------
     Two ROC windows are computed on raw close prices (no reversal skip):
-      • roc_short  — recent momentum  (cfg.roc_short_lookback days, default 21)
-      • roc_long   — trend momentum   (cfg.roc_long_lookback  days, default 63)
+      • roc_short  — recent momentum  (cfg.roc_short_lookback days)
+      • roc_long   — trend momentum   (cfg.roc_long_lookback  days)
 
     A stock qualifies as a *rising momentum* candidate when ALL of:
       1. roc_short > roc_long           momentum is accelerating (slope turning up)
@@ -342,8 +341,10 @@ def rising_momentum_sharpe(close: pd.DataFrame) -> pd.DataFrame:
       3. roc_short > 0                  at least slightly positive right now
 
     Candidates are ranked by (roc_short − roc_long) acceleration spread.
-    The top cfg.top_candidates are passed to the Sharpe optimiser which
-    selects and sizes the final cfg.top_n holdings.
+    The top cfg.top_candidates are passed to the Sharpe optimiser, which
+    uses a return window of cfg.rising_vol_lookback days (independent of
+    cfg.vol_lookback, which the other momentum strategies use) and selects
+    and sizes the final cfg.top_n holdings.
 
     No regime filter — always fully invested.
     Rebalances on cfg.rebalance_freq schedule.
@@ -387,8 +388,11 @@ def rising_momentum_sharpe(close: pd.DataFrame) -> pd.DataFrame:
         candidates = candidates_series.nlargest(n_cands).index.tolist()
 
         # Trailing return window for Sharpe optimisation
+        # Uses cfg.rising_vol_lookback (NOT cfg.vol_lookback) — kept separate
+        # so this strategy's fast signal cadence and its Sharpe sizing window
+        # stay matched, independent of whatever the other momentum strategies use.
         loc_i = close.index.get_loc(date)
-        start_i = max(0, loc_i - cfg.vol_lookback)
+        start_i = max(0, loc_i - cfg.rising_vol_lookback)
         ret_window = daily_returns.iloc[start_i : loc_i + 1][candidates].dropna(axis=1)
 
         # Need at least 2 stocks for a covariance matrix
@@ -462,3 +466,72 @@ def bollinger_mean_reversion(
 
     weights = _make_weights(entry, exit_, cfg.position_size)
     return pd.DataFrame(weights, index=close.index, columns=close.columns)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Strategy 7 — Trend-Filtered RSI Dip Buy  (monthly rebalanced)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def trend_filtered_dip_buy(close: pd.DataFrame) -> pd.DataFrame:
+    """
+    Mean reversion *within* an uptrend: only buy RSI dips on stocks that
+    are themselves above their own long-term moving average. This avoids
+    "catching a falling knife" — the classic failure mode of plain
+    Bollinger/RSI mean reversion, where a stock that looks oversold simply
+    keeps falling because it's in a genuine downtrend.
+
+    Selection logic (evaluated once per rebalance date)
+    ----------------------------------------------------
+    A stock qualifies as a dip-buy candidate when ALL of:
+      1. close > MA(cfg.dip_trend_ma)        stock is in a long-term uptrend
+      2. RSI(cfg.rsi_window) < cfg.rsi_entry  stock is short-term oversold
+
+    Among qualifying stocks, the ones with the *lowest* RSI (most oversold)
+    are ranked highest and the top cfg.top_n are selected. Positions are
+    equal-weighted — this is a tactical dip-buy, not a risk-budgeted
+    portfolio, so simple equal weight keeps the logic transparent.
+
+    If fewer than cfg.top_n stocks qualify, available candidates are
+    equal-weighted among themselves (not diluted by holding cash) — the
+    point is to size into the dips that exist, not to mechanically fill
+    cfg.top_n slots.
+
+    If zero stocks qualify, the strategy goes to cash for the month.
+
+    Rebalances on cfg.rebalance_freq schedule (monthly by default) — note
+    this is intentionally slower than a typical RSI mean-reversion
+    strategy, which usually checks daily. The monthly cadence means this
+    captures the *existence* of a trend-confirmed dip at rebalance time
+    rather than reacting to every daily wiggle, trading off some
+    responsiveness for far lower turnover and fees.
+    """
+    rsi = _flatten(vbt.RSI.run(close, window=cfg.rsi_window).rsi, close)
+    trend_ma = close.rolling(cfg.dip_trend_ma).mean()
+    above_trend = close > trend_ma
+
+    rebalance = _rebalance_mask(close.index)
+    out = pd.DataFrame(
+        np.nan, index=close.index, columns=close.columns, dtype=np.float32
+    )
+
+    for date in close.index[rebalance]:
+        rsi_row = rsi.loc[date]
+        trend_row = above_trend.loc[date]
+
+        candidate_mask = trend_row & rsi_row.notna() & (rsi_row < cfg.rsi_entry)
+        candidates_series = rsi_row[candidate_mask]
+
+        if len(candidates_series) == 0:
+            out.loc[date, :] = 0.0
+            continue
+
+        # Most oversold first (lowest RSI), cap at top_n
+        n_take = min(len(candidates_series), cfg.top_n)
+        chosen = candidates_series.nsmallest(n_take).index
+
+        weight = 1.0 / n_take
+        out.loc[date, :] = 0.0
+        out.loc[date, chosen] = np.float32(weight)
+
+    return out
