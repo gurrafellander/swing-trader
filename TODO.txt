@@ -1,5 +1,4 @@
 ## Portfolio view
-3. Overlay OMXS30 benchmark on portfolio price chart for comparison
 4. Add portfolio metrics: Sharpe ratio, max drawdown, CAGR
 
 ## Screener

@@ -5,15 +5,27 @@ Run with: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
+import pandas_ta as _ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
+from datetime import date
 
 from config import cfg
-from DataLoader import DataLoader
-from indicators import Indicators, ROC_LOOKBACK, ROC_ACCEL_DAYS
+from DataLoader import DataLoader, _download_raw
+from indicators import (
+    Indicators,
+    ROC_LOOKBACK,
+    ROC_ACCEL_DAYS,
+    compute_ma,
+    compute_bollinger,
+    compute_rsi,
+    compute_roc,
+)
 
 st.set_page_config(page_title="Stock Screener", layout="wide")
+
+BENCHMARK_TICKER = "^OMX"
 
 
 # ── Data loading (cached across all views) ────────────────────────────────────
@@ -31,13 +43,48 @@ def load_data():
     return close
 
 
+@st.cache_data(show_spinner="Downloading OMXS30 benchmark…")
+def load_benchmark():
+    """Download ^OMX separately — not included in tickers.txt to keep backtest clean."""
+    df = _download_raw([BENCHMARK_TICKER], cfg.start_date, str(date.today()))
+    if df.empty or BENCHMARK_TICKER not in df.columns:
+        return None
+    return df[BENCHMARK_TICKER].dropna()
+
+
+@st.cache_data(show_spinner="Downloading ticker…")
+def _fetch_ticker(ticker: str) -> pd.Series | None:
+    """On-demand download of any single ticker for the search feature."""
+    df = _download_raw([ticker], cfg.start_date, str(date.today()))
+    if df.empty or ticker not in df.columns:
+        return None
+    series = df[ticker].dropna()
+    return series if not series.empty else None
+
+
 @st.cache_data(show_spinner="Computing indicators…")
 def load_indicators(_close: pd.DataFrame) -> Indicators:
-    # Underscore prefix on _close tells Streamlit not to hash the DataFrame arg.
+    # Underscore prefix tells Streamlit not to hash the DataFrame arg.
     return Indicators(_close)
 
 
+def _adhoc_indicators(price: pd.Series) -> dict:
+    """Compute all chart indicators for a single price series (not cached — fast)."""
+    df = price.to_frame()
+    bb_u, bb_m, bb_l = compute_bollinger(df)
+    return {
+        "ma50": compute_ma(df, 50).iloc[:, 0],
+        "ma200": compute_ma(df, 200).iloc[:, 0],
+        "bb_upper": bb_u.iloc[:, 0],
+        "bb_mid": bb_m.iloc[:, 0],
+        "bb_lower": bb_l.iloc[:, 0],
+        "rsi": compute_rsi(df).iloc[:, 0],
+        "roc": compute_roc(df).iloc[:, 0],
+    }
+
+
 close = load_data()
+omx = load_benchmark()
 ind = load_indicators(close)
 tickers = list(close.columns)
 
@@ -48,26 +95,40 @@ if "portfolio" not in st.session_state:
     st.session_state.portfolio: list[str] = []
 
 
+def _save_portfolio(data: list):
+    with open("./portfolio-cache/assets.json", "w") as f:
+        json.dump(data, f)
+
+
 def add_to_portfolio(ticker: str):
     if ticker not in st.session_state.portfolio:
         st.session_state.portfolio.append(ticker)
-    _save_portfolio_changes(st.session_state.portfolio)
+    _save_portfolio(st.session_state.portfolio)
 
 
 def remove_from_portfolio(ticker: str):
     if ticker in st.session_state.portfolio:
         st.session_state.portfolio.remove(ticker)
-    _save_portfolio_changes(st.session_state.portfolio)
+    _save_portfolio(st.session_state.portfolio)
 
 
 def remove_entire_portfolio():
-    st.session_state.portfolio: list[str] = []
-    _save_portfolio_changes(st.session_state.portfolio)
+    st.session_state.portfolio = []
+    _save_portfolio(st.session_state.portfolio)
 
 
-def _save_portfolio_changes(data: list):
-    with open("./portfolio-cache/assets.json", "w") as f:
-        json.dump(data, f)
+def _add_to_universe(ticker: str):
+    """Append ticker to tickers.txt and invalidate data cache for next reload."""
+    with open(cfg.ticker_path, "a") as f:
+        f.write(f"\n{ticker}")
+    st.cache_data.clear()
+
+
+def add_searched_to_portfolio(ticker: str):
+    """Add a freshly-searched ticker: persist to universe, then add to portfolio."""
+    if ticker not in tickers:
+        _add_to_universe(ticker)
+    add_to_portfolio(ticker)
 
 
 # ── Shared chart helpers ──────────────────────────────────────────────────────
@@ -82,6 +143,7 @@ def _price_indicator_chart(
     bb_upper: pd.Series | None = None,
     bb_mid: pd.Series | None = None,
     bb_lower: pd.Series | None = None,
+    benchmark_series: pd.Series | None = None,
     title: str = "",
     show_rsi: bool = True,
 ) -> go.Figure:
@@ -89,6 +151,7 @@ def _price_indicator_chart(
     Two-row Plotly figure: price (with optional overlays) + momentum panel.
     Both rows share the x-axis so zoom/pan stays in sync.
     Bottom row uses dual y-axis: RSI (left) and ROC (right).
+    Optional benchmark_series overlaid on the price row as a yellow line.
     """
     row_heights = [0.65, 0.35]
     specs = [[{}], [{"secondary_y": True}]]
@@ -107,12 +170,25 @@ def _price_indicator_chart(
         go.Scatter(
             x=price_series.index,
             y=price_series.values,
-            name="Price",
+            name=price_series.name or "Price",
             line=dict(color="#1f77b4", width=1.5),
         ),
         row=1,
         col=1,
     )
+
+    if benchmark_series is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=benchmark_series.index,
+                y=benchmark_series.values,
+                name="OMXS30",
+                line=dict(color="#f0c040", width=1.5),
+            ),
+            row=1,
+            col=1,
+        )
+
     if ma50 is not None:
         fig.add_trace(
             go.Scatter(
@@ -290,30 +366,130 @@ st.sidebar.caption(
 if view == "Single Stock":
     st.header("Single Stock View")
 
-    col_pick, col_btn = st.columns([4, 1])
-    with col_pick:
-        ticker = st.selectbox("Select ticker", tickers, index=0)
-    with col_btn:
-        st.write("")  # vertical alignment
-        st.write("")
-        if st.button("＋ Add to portfolio", key="single_add"):
-            add_to_portfolio(ticker)
-            st.toast(f"{ticker} added to portfolio.")
+    tab_browse, tab_search = st.tabs(["Browse Universe", "Search Ticker"])
 
-    price = close[ticker].dropna()
-    fig = _price_indicator_chart(
-        price_series=price,
-        rsi_series=ind.rsi[ticker].dropna(),
-        roc_series=ind.roc[ticker].dropna(),
-        ma50=ind.ma50[ticker].dropna(),
-        ma200=ind.ma200[ticker].dropna(),
-        bb_upper=ind.bb_upper[ticker].dropna(),
-        bb_mid=ind.bb_mid[ticker].dropna(),
-        bb_lower=ind.bb_lower[ticker].dropna(),
-        title=ticker,
-        show_rsi=True,
-    )
-    st.plotly_chart(fig, width="stretch")
+    # ── Browse tab: universe + ^OMX ───────────────────────────────────────────
+    with tab_browse:
+        selectable = [BENCHMARK_TICKER] + tickers
+        col_pick, col_btn = st.columns([4, 1])
+        with col_pick:
+            ticker = st.selectbox("Select ticker", selectable, index=1)
+        with col_btn:
+            st.write("")
+            st.write("")
+            if ticker != BENCHMARK_TICKER:
+                if st.button("＋ Add to portfolio", key="browse_add"):
+                    add_to_portfolio(ticker)
+                    st.toast(f"{ticker} added to portfolio.")
+
+        if ticker == BENCHMARK_TICKER:
+            if omx is None:
+                st.error("Could not load ^OMX benchmark data.")
+            else:
+                price = omx
+                adh = _adhoc_indicators(price)
+                fig = _price_indicator_chart(
+                    price_series=price,
+                    rsi_series=adh["rsi"].dropna(),
+                    roc_series=adh["roc"].dropna(),
+                    ma50=adh["ma50"].dropna(),
+                    ma200=adh["ma200"].dropna(),
+                    bb_upper=adh["bb_upper"].dropna(),
+                    bb_mid=adh["bb_mid"].dropna(),
+                    bb_lower=adh["bb_lower"].dropna(),
+                    title="OMXS30 (^OMX) — benchmark, not tradeable",
+                    show_rsi=True,
+                )
+                st.plotly_chart(fig, width="stretch")
+        else:
+            price = close[ticker].dropna()
+            fig = _price_indicator_chart(
+                price_series=price,
+                rsi_series=ind.rsi[ticker].dropna(),
+                roc_series=ind.roc[ticker].dropna(),
+                ma50=ind.ma50[ticker].dropna(),
+                ma200=ind.ma200[ticker].dropna(),
+                bb_upper=ind.bb_upper[ticker].dropna(),
+                bb_mid=ind.bb_mid[ticker].dropna(),
+                bb_lower=ind.bb_lower[ticker].dropna(),
+                title=ticker,
+                show_rsi=True,
+            )
+            st.plotly_chart(fig, width="stretch")
+
+    # ── Search tab: any ticker on demand ──────────────────────────────────────
+    with tab_search:
+        st.subheader("Search any ticker")
+        st.caption(
+            "Type any Yahoo Finance ticker symbol, download it, and optionally add it to your "
+            "portfolio. Adding to portfolio also saves the ticker to tickers.txt so it is "
+            "included in the universe on next app start."
+        )
+
+        col_t, col_btn = st.columns([3, 1])
+        with col_t:
+            search_sym = st.text_input(
+                "Ticker symbol",
+                placeholder="e.g. VOLV-B.ST, TSLA, NOVO-B.CO",
+                key="search_input",
+            )
+        with col_btn:
+            st.write("")
+            search_clicked = st.button("Download & Preview", key="search_btn")
+
+        if search_clicked and search_sym:
+            sym = search_sym.strip().upper()
+            data = _fetch_ticker(sym)
+            if data is None:
+                st.error(f"No data found for '{sym}'. Check the ticker symbol and try again.")
+                st.session_state.pop("search_result", None)
+            else:
+                st.session_state["search_result"] = {"ticker": sym, "data": data}
+
+        if "search_result" in st.session_state:
+            res = st.session_state["search_result"]
+            sym = res["ticker"]
+            price = res["data"]
+            already_in_universe = sym in tickers
+
+            adh = _adhoc_indicators(price)
+            fig = _price_indicator_chart(
+                price_series=price,
+                rsi_series=adh["rsi"].dropna(),
+                roc_series=adh["roc"].dropna(),
+                ma50=adh["ma50"].dropna(),
+                ma200=adh["ma200"].dropna(),
+                bb_upper=adh["bb_upper"].dropna(),
+                bb_mid=adh["bb_mid"].dropna(),
+                bb_lower=adh["bb_lower"].dropna(),
+                title=f"{sym}" + ("" if already_in_universe else " (preview — not yet in universe)"),
+                show_rsi=True,
+            )
+            st.plotly_chart(fig, width="stretch")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                btn_label = (
+                    f"＋ Add {sym} to portfolio"
+                    if already_in_universe
+                    else f"＋ Add {sym} to portfolio & universe"
+                )
+                btn_help = (
+                    None
+                    if already_in_universe
+                    else "Saves ticker to tickers.txt and adds to portfolio. Universe refreshes on next app start."
+                )
+                if st.button(btn_label, key=f"search_add_{sym}", help=btn_help):
+                    add_searched_to_portfolio(sym)
+                    st.toast(f"{sym} added to portfolio.")
+                    if not already_in_universe:
+                        st.info(
+                            f"**{sym}** saved to tickers.txt. "
+                            "It will be included in the full universe the next time the app starts."
+                        )
+            with c2:
+                if already_in_universe:
+                    st.info(f"{sym} is already in the ticker universe.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -484,15 +660,29 @@ elif view == "Portfolio":
                 portfolio_value = rebased.mean(axis=1)
                 portfolio_value.name = "Portfolio"
 
-                # ROC on the portfolio value series (same definition as single-stock)
-                import pandas_ta as _ta
+                # ── OMXS30 benchmark toggle ───────────────────────────────────
+                show_omx = st.toggle("Show OMXS30 benchmark", value=False)
 
+                omx_rebased = None
+                if show_omx:
+                    if omx is None:
+                        st.warning("Could not load OMXS30 benchmark data.")
+                    else:
+                        # Reindex OMX to the portfolio date range and rebase to 100 at the same start
+                        omx_aligned = omx.reindex(port_close.index).ffill()
+                        first_omx = omx_aligned.first_valid_index()
+                        if first_omx is not None:
+                            omx_rebased = omx_aligned / omx_aligned[first_omx] * 100
+                            omx_rebased.name = "OMXS30"
+
+                # ROC on the portfolio value series (same definition as single-stock)
                 port_roc = _ta.roc(portfolio_value, length=ROC_LOOKBACK)
 
                 fig = _price_indicator_chart(
                     price_series=portfolio_value,
                     rsi_series=None,
                     roc_series=port_roc.dropna(),
+                    benchmark_series=omx_rebased,
                     title=f"Portfolio ({len(valid)} holdings, rebased to 100)",
                     show_rsi=False,
                 )
