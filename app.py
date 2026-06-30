@@ -453,14 +453,15 @@ elif view == "Portfolio":
     else:
         # Remove button per ticker
         st.markdown("**Holdings:**")
-        rm_cols = st.columns(min(len(portfolio), 9))
+        row_length = min(len(portfolio), 8)
+        rm_cols = st.columns(row_length + 1)
         for i, t in enumerate(list(portfolio)):
-            with rm_cols[i % 8]:
+            with rm_cols[i % row_length]:
                 if st.button(f"✕ {t}", key=f"rm_{t}"):
                     remove_from_portfolio(t)
                     st.rerun()
         with rm_cols[-1]:
-            if st.button("✕ Clear all"):
+            if st.button("✕ Clear all", type="primary"):
                 remove_entire_portfolio()
                 st.rerun()
 
