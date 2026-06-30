@@ -5,7 +5,6 @@ Run with: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
-import pandas_ta as _ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
@@ -21,6 +20,12 @@ from indicators import (
     compute_bollinger,
     compute_rsi,
     compute_roc,
+)
+from portfolio_view import (
+    add_to_portfolio,
+    remove_from_portfolio,
+    remove_entire_portfolio,
+    render_portfolio_view,
 )
 
 st.set_page_config(page_title="Stock Screener", layout="wide")
@@ -93,28 +98,6 @@ tickers = list(close.columns)
 
 if "portfolio" not in st.session_state:
     st.session_state.portfolio: list[str] = []
-
-
-def _save_portfolio(data: list):
-    with open("./portfolio-cache/assets.json", "w") as f:
-        json.dump(data, f)
-
-
-def add_to_portfolio(ticker: str):
-    if ticker not in st.session_state.portfolio:
-        st.session_state.portfolio.append(ticker)
-    _save_portfolio(st.session_state.portfolio)
-
-
-def remove_from_portfolio(ticker: str):
-    if ticker in st.session_state.portfolio:
-        st.session_state.portfolio.remove(ticker)
-    _save_portfolio(st.session_state.portfolio)
-
-
-def remove_entire_portfolio():
-    st.session_state.portfolio = []
-    _save_portfolio(st.session_state.portfolio)
 
 
 def _add_to_universe(ticker: str):
@@ -611,84 +594,14 @@ elif view == "Screener":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif view == "Portfolio":
-    st.header("Portfolio View")
-    st.caption(
-        "Equal-weighted, buy-and-hold from earliest common date. "
-        "Weights are set once and drift naturally — no periodic rebalancing."
-    )
-
     with open("./portfolio-cache/assets.json", "r") as f:
         st.session_state.portfolio = json.load(f)
 
-    portfolio = st.session_state.portfolio
-
-    if not portfolio:
-        st.info(
-            "Your portfolio is empty. Add tickers from the Single Stock or Screener views."
-        )
-    else:
-        # Remove button per ticker
-        st.markdown("**Holdings:**")
-        row_length = min(len(portfolio), 8)
-        rm_cols = st.columns(row_length + 1)
-        for i, t in enumerate(list(portfolio)):
-            with rm_cols[i % row_length]:
-                if st.button(f"✕ {t}", key=f"rm_{t}"):
-                    remove_from_portfolio(t)
-                    st.rerun()
-        with rm_cols[-1]:
-            if st.button("✕ Clear all", type="primary"):
-                remove_entire_portfolio()
-                st.rerun()
-
-        # Filter to tickers that exist in our universe
-        valid = [t for t in portfolio if t in close.columns]
-        missing = [t for t in portfolio if t not in close.columns]
-        if missing:
-            st.warning(f"Not in universe (ignoring): {', '.join(missing)}")
-
-        if not valid:
-            st.info("No valid tickers remaining.")
-        else:
-            # Align to common date range
-            port_close = close[valid].dropna(how="any")
-            if port_close.empty:
-                st.warning("No overlapping data across all holdings.")
-            else:
-                # Rebase each series to 100 at first common date, equal-weight average
-                rebased = port_close.div(port_close.iloc[0]) * 100
-                portfolio_value = rebased.mean(axis=1)
-                portfolio_value.name = "Portfolio"
-
-                # ── OMXS30 benchmark toggle ───────────────────────────────────
-                show_omx = st.toggle("Show OMXS30 benchmark", value=False)
-
-                omx_rebased = None
-                if show_omx:
-                    if omx is None:
-                        st.warning("Could not load OMXS30 benchmark data.")
-                    else:
-                        # Reindex OMX to the portfolio date range and rebase to 100 at the same start
-                        omx_aligned = omx.reindex(port_close.index).ffill()
-                        first_omx = omx_aligned.first_valid_index()
-                        if first_omx is not None:
-                            omx_rebased = omx_aligned / omx_aligned[first_omx] * 100
-                            omx_rebased.name = "OMXS30"
-
-                # ROC on the portfolio value series (same definition as single-stock)
-                port_roc = _ta.roc(portfolio_value, length=ROC_LOOKBACK)
-
-                fig = _price_indicator_chart(
-                    price_series=portfolio_value,
-                    rsi_series=None,
-                    roc_series=port_roc.dropna(),
-                    benchmark_series=omx_rebased,
-                    title=f"Portfolio ({len(valid)} holdings, rebased to 100)",
-                    show_rsi=False,
-                )
-                st.plotly_chart(fig, width="stretch")
-
-                st.caption(
-                    f"Start date: {port_close.index[0].date()}  |  "
-                    f"Holdings: {', '.join(valid)}"
-                )
+    render_portfolio_view(
+        close=close,
+        omx=omx,
+        price_indicator_chart_fn=_price_indicator_chart,
+        portfolio=st.session_state.portfolio,
+        remove_fn=remove_from_portfolio,
+        clear_fn=remove_entire_portfolio,
+    )
