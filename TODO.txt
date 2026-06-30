@@ -1,13 +1,9 @@
 ## Portfolio view
-1. Add "remove all" button for stocks in portfolio
-2. Save/load portfolio to disk so it persists across sessions
 3. Overlay OMXS30 benchmark on portfolio price chart for comparison
 4. Add portfolio metrics: Sharpe ratio, max drawdown, CAGR
-5. Custom (non-equal) portfolio weighting
 
 ## Screener
 6. Historical screener queries (e.g. "show RSI < 30 on every day in the past year") — currently snapshot-only
-7. Filter persistence: remember last-used filter values across page loads
 
 ## Single stock view
 8. Candlestick chart option (currently line only)

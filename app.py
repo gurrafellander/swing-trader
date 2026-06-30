@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import json
 
 from config import cfg
 from DataLoader import DataLoader
@@ -50,11 +51,23 @@ if "portfolio" not in st.session_state:
 def add_to_portfolio(ticker: str):
     if ticker not in st.session_state.portfolio:
         st.session_state.portfolio.append(ticker)
+    _save_portfolio_changes(st.session_state.portfolio)
 
 
 def remove_from_portfolio(ticker: str):
     if ticker in st.session_state.portfolio:
         st.session_state.portfolio.remove(ticker)
+    _save_portfolio_changes(st.session_state.portfolio)
+
+
+def remove_entire_portfolio():
+    st.session_state.portfolio: list[str] = []
+    _save_portfolio_changes(st.session_state.portfolio)
+
+
+def _save_portfolio_changes(data: list):
+    with open("./portfolio-cache/assets.json", "w") as f:
+        json.dump(data, f)
 
 
 # ── Shared chart helpers ──────────────────────────────────────────────────────
@@ -228,16 +241,28 @@ def _price_indicator_chart(
     if show_rsi:
         fig.update_yaxes(
             title_text="RSI",
-            row=2, col=1, secondary_y=False,
-            range=[0, 100], showgrid=True, gridcolor="#f0f0f0",
+            row=2,
+            col=1,
+            secondary_y=False,
+            range=[0, 100],
+            showgrid=True,
+            gridcolor="#f0f0f0",
         )
         fig.update_yaxes(
-            title_text="ROC %", row=2, col=1, secondary_y=True, showgrid=False,
+            title_text="ROC %",
+            row=2,
+            col=1,
+            secondary_y=True,
+            showgrid=False,
         )
     else:
         fig.update_yaxes(
-            title_text="ROC %", row=2, col=1, secondary_y=False,
-            showgrid=True, gridcolor="#f0f0f0",
+            title_text="ROC %",
+            row=2,
+            col=1,
+            secondary_y=False,
+            showgrid=True,
+            gridcolor="#f0f0f0",
         )
 
     return fig
@@ -416,6 +441,9 @@ elif view == "Portfolio":
         "Weights are set once and drift naturally — no periodic rebalancing."
     )
 
+    with open("./portfolio-cache/assets.json", "r") as f:
+        st.session_state.portfolio = json.load(f)
+
     portfolio = st.session_state.portfolio
 
     if not portfolio:
@@ -425,12 +453,16 @@ elif view == "Portfolio":
     else:
         # Remove button per ticker
         st.markdown("**Holdings:**")
-        rm_cols = st.columns(min(len(portfolio), 8))
+        rm_cols = st.columns(min(len(portfolio), 9))
         for i, t in enumerate(list(portfolio)):
             with rm_cols[i % 8]:
                 if st.button(f"✕ {t}", key=f"rm_{t}"):
                     remove_from_portfolio(t)
                     st.rerun()
+        with rm_cols[-1]:
+            if st.button("✕ Clear all"):
+                remove_entire_portfolio()
+                st.rerun()
 
         # Filter to tickers that exist in our universe
         valid = [t for t in portfolio if t in close.columns]
@@ -453,6 +485,7 @@ elif view == "Portfolio":
 
                 # ROC on the portfolio value series (same definition as single-stock)
                 import pandas_ta as _ta
+
                 port_roc = _ta.roc(portfolio_value, length=ROC_LOOKBACK)
 
                 fig = _price_indicator_chart(

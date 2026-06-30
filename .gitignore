@@ -1,6 +1,7 @@
 venv/
 __pycache__/
 price_cache/
+portfolio-cache/
 *.html
 *.csv
  
