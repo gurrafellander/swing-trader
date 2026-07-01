@@ -1,10 +1,7 @@
-vectorbt
 pandas
 numpy
-matplotlib
 yfinance
 pandas-ta
-flask
 pyarrow
 streamlit
 plotly

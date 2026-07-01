@@ -2,7 +2,7 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
-import vectorbt as vbt
+import yfinance as yf
 
 # Local price cache — gitignored, built on first run and kept up to date.
 _CACHE_DIR = Path("price_cache")
@@ -31,11 +31,15 @@ def _download_raw(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     close_dict = {}
     for ticker in tickers:
         try:
-            data = vbt.YFData.download(ticker, start=start, end=end, interval="1d")
+            data = yf.download(
+                ticker, start=start, end=end, interval="1d", auto_adjust=True, progress=False
+            )
             close = data.get("Close")
             if close is None or close.empty:
                 print(f"  Skipping {ticker} (no data)")
                 continue
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
             close_dict[ticker] = close
         except Exception as e:
             print(f"  Skipping {ticker}: {e}")
@@ -166,8 +170,13 @@ class DataLoader:
     def download_benchmark(self, index, ticker="^OMX"):
         print(f"Downloading benchmark ({ticker})…")
         try:
-            data = vbt.YFData.download(
-                ticker, start=self.start_date, end=self.end_date, interval="1d"
+            data = yf.download(
+                ticker,
+                start=self.start_date,
+                end=self.end_date,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
             )
             bench = data.get("Close")
             if isinstance(bench, pd.DataFrame):
