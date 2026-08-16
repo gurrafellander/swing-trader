@@ -8,6 +8,7 @@ Called from app.py via render_portfolio_view().
 """
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,10 +21,12 @@ from portfolio_analysis import run_monte_carlo
 
 # ── Portfolio persistence helpers ─────────────────────────────────────────────
 
-_PORTFOLIO_PATH = "./portfolio-cache/assets.json"
+_PORTFOLIO_DIR = Path("./portfolio-cache")
+_PORTFOLIO_PATH = _PORTFOLIO_DIR / "assets.json"
 
 
-def _load_portfolio_file() -> list:
+def load_portfolio_file() -> list:
+    """Read the persisted watchlist, tolerating a first-run/missing cache dir."""
     try:
         with open(_PORTFOLIO_PATH, "r") as f:
             return json.load(f)
@@ -32,12 +35,13 @@ def _load_portfolio_file() -> list:
 
 
 def _save_portfolio_file(data: list) -> None:
+    _PORTFOLIO_DIR.mkdir(exist_ok=True)
     with open(_PORTFOLIO_PATH, "w") as f:
         json.dump(data, f)
 
 
 def add_to_portfolio(ticker: str) -> None:
-    portfolio = _load_portfolio_file()
+    portfolio = load_portfolio_file()
     if ticker not in portfolio:
         portfolio.append(ticker)
     st.session_state.portfolio = portfolio
@@ -45,7 +49,7 @@ def add_to_portfolio(ticker: str) -> None:
 
 
 def remove_from_portfolio(ticker: str) -> None:
-    portfolio = _load_portfolio_file()
+    portfolio = load_portfolio_file()
     if ticker in portfolio:
         portfolio.remove(ticker)
     st.session_state.portfolio = portfolio

@@ -7,7 +7,6 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import json
 from datetime import date
 
 from config import cfg
@@ -26,6 +25,7 @@ from portfolio_view import (
     remove_from_portfolio,
     remove_entire_portfolio,
     render_portfolio_view,
+    load_portfolio_file,
 )
 
 st.set_page_config(page_title="Stock Screener", layout="wide")
@@ -594,8 +594,7 @@ elif view == "Screener":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif view == "Portfolio":
-    with open("./portfolio-cache/assets.json", "r") as f:
-        st.session_state.portfolio = json.load(f)
+    st.session_state.portfolio = load_portfolio_file()
 
     render_portfolio_view(
         close=close,
